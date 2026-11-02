@@ -1,24 +1,24 @@
-# 小智 Hub：ARM64 路由器 Docker 部署
+# 小智 Hub：保留原项目功能的 ARM64 Docker 部署
 
-针对当前 JDCloud RE-CP-03 / ImmortalWrt / Docker 20.10 的部署配置。
-基于现有 Hub 源码运行，建议将仓库放在 `/mnt/data/xiaozhi-hub-server`。Docker 数据根目录需先设置为 `/mnt/data/docker`，并确认 `/mnt/data` 开机自动挂载。
+此目录只负责容器化，不再使用之前的 API 精简方案。保留原项目代码及其全部已声明依赖，包括 PyTorch、torchaudio、FunASR、sherpa-onnx、ModelScope、Claude SDK、记忆模块和 MCP 等。
+不修改模型路由、插件、工具调用、语音识别、合成、记忆和管理后台的实现；原项目支持的配置仍由用户选择。
 
-## 功能和资源
+## 与原项目保持一致的部分
 
-- 大模型：OpenAI 兼容 API，可在后台更换厂商、地址、模型和密钥。
-- 语音识别：默认使用上游支持的豆包流式识别，在后台填识别密钥。
-- 语音合成：EdgeTTS；需要网络连通，不需要在此模板中填写密钥。
-- 保留小型 Silero VAD 判断说话和停顿；不安装 PyTorch、本地 X-ASR、FunASR、sherpa-onnx。
-- 保留管理后台和必要的共享 Python 依赖。包括上游共享组件需要导入的 Claude SDK，但不配置或启动 Claude Code。
-- 容器内存上限 384MiB；实际内存、性能和兼容性需在目标路由器验证。内存不足会导致容器重启，不要立即放开上限挤占路由功能。
-- 本部署目录不提供已构建镜像。首次需要联网下载 ARM64 Python 基础镜像、Debian 软件包和 Python 依赖，再在路由器构建。
+- 新配置以 `scripts/config.template.yaml` 为基础，默认语音识别仍是本地 X-ASR；不会强制切换到豆包。
+- 默认 X-ASR 下载与原生安装相同的五个文件，包含在镜像中。Silero VAD 使用仓库原有模型。
+- 保留原模板的 Intent、Memory、TTS、日志等设置，不额外关闭工具、记忆或后台功能。
+- 用户主要使用 API，因此首次配置默认 LLM 为原模板内的 `ClaudeAPI`，可在后台选择其他 API 或 ClaudeCLI；这只是初始选择，不限制其他功能。
+- Claude SDK 已包含可执行 CLI，镜像将其暴露为 `claude`，支持在容器内登录；登录信息和工作目录持久化。
+- 不再设置固定 384MiB 内存上限；如需限制，可由使用者通过 `HUB_MEMORY` 自行设置。
+- 其他模块需要的专用模型、账号、API 密钥、外部服务仍按原项目配置，并非每个第三方模型和服务都预置在镜像内。
 
-大模型 API 与语音识别 API 是不同服务。只有聊天模型密钥，不能完成语音转文字。
+**功能保留不等于硬件足够。** JDCloud RE-CP-03 只有约 1GB 内存，同时运行本地模型、Claude Code 或较重记忆模块，可能耗尽路由器内存。应在实际设备上测量；不会通过删除功能来规避此限制。完整镜像和构建缓存也比旧精简版大。
 
-## 1. 获取源码和构建镜像
+## 1. 准备
 
-路由器需要 Docker、Git 和可用的外网连接。没有 Git 时可以下载此仓库的源码压缩包，解压到相同目录。
-在路由器 SSH 中执行（目录已存在时不要重复 clone）：
+先确认 `/mnt/data` 开机自动挂载，Docker 数据根目录是 `/mnt/data/docker`，存储驱动是 overlay2。
+需要 ARM64 Docker、Git 和可用的网络；没有 Git 时也可下载仓库源码压缩包。
 
 ```sh
 cd /mnt/data
@@ -27,15 +27,14 @@ cd /mnt/data/xiaozhi-hub-server
 sh deploy/router/build.sh
 ```
 
-脚本实际运行的是：
+目录已存在时不要重复 clone。Python、系统依赖、CLI 和模型均装在镜像内，宿主机不需要 Python 或 Compose。
+完整构建可能耗时较长，也可能超出路由器可用内存；这时可在另一台 ARM64 Linux 机器构建后，用 `docker save` / `docker load` 导入相同镜像，功能不变。
+
+本地 X-ASR 下载较慢时可指定镜像站：
 
 ```sh
-docker build -f deploy/router/Dockerfile -t xiaozhi-hub-router:local .
+HF_ENDPOINT=https://hf-mirror.com sh deploy/router/build.sh
 ```
-
-Python、ffmpeg 和 Python 依赖均安装在镜像中，宿主机不需要安装 Python、uv 或 Compose。
-构建在前台运行；若 SSH 断开，应检查镜像是否成功构建，再决定重跑构建脚本。
-构建失败时保留最后 50 行报错，不要使用上游 `docker-setup.sh` 混装。
 
 ## 2. 启动
 
@@ -44,118 +43,109 @@ cd /mnt/data/xiaozhi-hub-server/deploy/router
 sh start.sh
 ```
 
-脚本从 `network.lan.ipaddr` 读取局域网 IPv4。特殊网络配置下手动指定：
+特殊网络配置下手动指定 LAN IPv4：
 
 ```sh
 sh start.sh 192.168.1.1
 ```
 
-端口只发布到指定的 LAN IPv4，不使用 host 网络、不映射 WAN 地址、不使用 privileged。
-Docker 数据目录保持为 `/mnt/data/docker`；本项目的配置和聊天记录在 `deploy/router/data`。
-临时音频和应用日志在 `deploy/router/tmp`，Docker 自身日志限制为两份、每份 5MB。
-
-首次启动创建 `data/.config.yaml`；后续重启不覆盖里面的密码和密钥。
-路由器 IP 变更后需修改此配置中的 websocket、vision_explain，并重建容器的端口绑定。
-
-## 3. 网页配置
-
-使用脚本输出的实际路由器 IP 打开：
-
-```text
-http://192.168.1.1:16688/admin
-```
-
-1. 先设置管理密码。
-2. 在“大模型”选择所用厂商或“自定义”，填写真实 API 地址、模型名称和 Key，并选为使用中的模型。
-   模板 `api.example.com` 只是占位地址，必须替换；大模型地址通常填服务商文档提供的兼容 API 根地址。
-3. 在“语音识别”使用豆包流式识别，填与已开通语音识别资源对应的 API Key，或按后台要求填写旧版 App ID / Access Token。
-   模板资源 ID 为 `volc.seedasr.sauc.duration`，请确保与你实际开通的资源一致。
-4. 在“语音合成”选择音色并测试 EdgeTTS。
-5. 检查后台状态，再连接设备。
-
-首次没有填 Key 时出现配置错误提示是预期行为，此时不能语音对话。不要把密钥发到聊天里。
-本镜像没有本地识别组件，后台不要切换到本地 X-ASR，也不要选用 Claude Code。
-后台中的插件可以按需配置；默认 Intent 是 nointent，主要用于基础 API 对话。
-
-## 4. 设备连接
-
-设备 OTA 地址（替换 IP，保留末尾斜杠）：
-
-```text
-http://192.168.1.1:16688/xiaozhi/ota/
-```
-
-若客户端直接填写 WebSocket 地址：
-
-```text
-ws://192.168.1.1:16689/xiaozhi/v1/
-```
-
-后台支持浏览器访问不代表设备协议、录音、回声消除和网络都已通过测试；需在实际 ThinkSmart 客户端验证完整对话。
-只在可信局域网使用，不做公网端口转发。上游的设备身份认证有限，后台管理密码不等于语音连接认证。
-
-## 5. 可选：换成其他兼容语音转写 API
-
-在路由器上编辑：
+首次初始化默认为 API 模型；如需要首次即使用 Claude Code：
 
 ```sh
-vi /mnt/data/xiaozhi-hub-server/deploy/router/data/.config.yaml
+HUB_DEFAULT_LLM=ClaudeCLI sh start.sh 192.168.1.1
 ```
 
-把 `selected_module.ASR` 改成 `RouterTranscriptionASR`，然后修改同名条目的：
+此变量只影响新建配置，重启不覆盖已有配置、密码或 API Key。
+端口仅发布到指定 LAN IPv4；服务仍只适用于可信局域网。Docker 隔离边界仍适用，Claude Code 只能访问容器内或明确挂载的文件。
 
-- `base_url`：完整 multipart 音频转写接口 URL，例如服务商的 `/v1/audio/transcriptions`。
-- `api_key`：该识别服务的 Key。
-- `model_name`：支持音频转写的模型，不能填写普通聊天模型名称。
+容器先初始化挂载目录的属主，然后以普通用户 `xiaozhi`（UID/GID 1000）运行，支持 Claude Code 的原有权限模式。首次启动会将以下挂载内容改为该用户所有；旧版 root 属主的配置文件也能继续读取。
 
-保存后执行：
+| 数据 | 宿主机 / Docker 卷 |
+| --- | --- |
+| 配置、聊天记录和后台数据 | `deploy/router/data` |
+| 临时文件和应用日志 | `deploy/router/tmp` |
+| Claude 登录、用户设置和 `~/xiaozhi-workspace` | `deploy/router/home` |
+| 默认识别模型、其他模型和识别缓存 | 命名卷 `xiaozhi-hub-models` |
+
+命名卷首次创建时由 Docker 复制镜像内的模型。以后更新镜像不会覆盖已有卷；新增或更新模型时按原项目说明管理卷内文件。
+
+可选的资源上限（不指定则不增加容器内存上限）：
 
 ```sh
-docker restart xiaozhi-hub
+HUB_MEMORY=768m sh start.sh 192.168.1.1
 ```
 
-原后台的语音识别页主要支持豆包和本地识别，这个替代条目需要手动编辑。
-当前兼容转写 Provider 为上游实现；具体服务商的响应格式和端到端延迟需实际测试。
+这不是 1GB 路由器的推荐容量，仅示范参数格式。Compose 使用者可自行添加 `mem_limit`。
 
-## 6. 管理和排障
+## 3. 配置和连接
+
+打开启动脚本输出的后台地址，先设置密码，再按原项目说明配置模型、语音识别、音色、插件、工具和记忆。
+
+```text
+后台：http://路由器LAN-IP:16688/admin
+OTA：http://路由器LAN-IP:16688/xiaozhi/ota/
+WebSocket：ws://路由器LAN-IP:16689/xiaozhi/v1/
+```
+
+主要使用 API 时，在后台填写真实厂商、模型、地址和密钥即可；是否使用云端语音识别由你选择。
+本地 X-ASR 不需要语音识别 API Key。模型支持、接口和第三方服务的限制与原项目相同。
+
+Claude Code 登录：
 
 ```sh
-docker ps -a --filter name=xiaozhi-hub
+docker exec -it -u xiaozhi -e HOME=/home/xiaozhi xiaozhi-hub claude
+```
+
+按 CLI 提示登录，然后在管理后台选择 ClaudeCLI。需要给 Agent 使用的项目，可放在持久化的 `deploy/router/home/xiaozhi-workspace`；其他宿主机目录需要自行增加 Docker 挂载。
+
+## 4. 从之前的精简容器更新
+
+先备份现有 `deploy/router/data`、`tmp` 和原镜像，再更新源码并构建成功，最后才替换旧容器：
+
+```sh
+cd /mnt/data/xiaozhi-hub-server
+git pull --ff-only
+sh deploy/router/build.sh
+```
+
+确认构建成功后：
+
+```sh
+docker stop xiaozhi-hub
+docker rm xiaozhi-hub
+cd /mnt/data/xiaozhi-hub-server/deploy/router
+sh start.sh
+```
+
+原数据目录保持不变。为保护密码、API Key 和用户选择，已有配置不会自动恢复默认：若之前使用豆包 / 自定义 API，升级后仍保持该选择，需要在后台自行切换。
+如果曾使用独立压缩包，数据可能在 `/mnt/data/xiaozhi-router/data`，应先备份并迁移到本仓库的 `deploy/router/data`，不要直接启动空配置覆盖原使用环境。
+
+## 5. 日常管理
+
+```sh
 docker logs --tail 80 xiaozhi-hub
 docker stats --no-stream xiaozhi-hub
 docker inspect --format '{{.State.Health.Status}}' xiaozhi-hub
 docker inspect --format '{{.State.OOMKilled}}' xiaozhi-hub
 docker restart xiaozhi-hub
-docker stop xiaozhi-hub
-docker start xiaozhi-hub
 ```
 
-Healthcheck 只检测后台 HTTP 服务，不代表 ASR / LLM / TTS 的密钥和网络已正常。
-日志里的配置错误请先检查后台；如日志含密钥或用户文字，分享报错前自行遮盖。
-Docker 透明代理和宿主机代理的效果可能不同，需测试容器的实际外网连接。
+Healthcheck 只表示后台 HTTP 服务正常，不代表所有模型、API、音频设备和外部服务都已验证。
+完整模型组合需要在目标设备验证延迟和内存。路由器透明代理也需要检查容器的实际联网情况。
 
-路由器重启后 `/mnt/data` 必须先挂载、Docker 再启动。如果未自动启动，先确认挂载，再重启 dockerd。
+Docker 部署通过更新源码、重建镜像和重建容器升级，不在运行中的镜像内执行原生系统服务安装或一键源码更新脚本。原生安装的开机自启由 Docker restart policy 替代。
+不挂载宿主机 Docker socket，也不启用 privileged。宿主机设备、USB 等访问如有需要，应像其他 Docker 服务一样按实际模块配置。
 
-## 7. 更新和移除
+## 6. 依赖与验证
 
-不要使用后台的一键源码更新或原生安装脚本更新容器。镜像使用构建时的仓库源码和已锁定的 Python 依赖。
-先备份 `deploy/router/data` 和原镜像，再更新仓库、重新构建镜像，最后重建容器；挂载同一个 `data` 保留配置和历史。不要只重启旧容器就认为镜像已更新。
-删除服务只需 `docker stop xiaozhi-hub` 后 `docker rm xiaozhi-hub`；这不会删除宿主机 data。
-无需卸载 Docker，不要删除 `/mnt/data/docker`，里面还有原来的 MiGPT 数据。
-
-## 验证范围
-
-检查结果见 [VALIDATION.txt](VALIDATION.txt)。未在你的 ARM64 路由器上执行 Docker 构建或实际语音对话；需要你运行后回传构建或启动结果。
-
-## 8. 重新锁定 Python 依赖（开发者）
-
-仅在升级依赖时执行；这一步需要开发机安装 uv，路由器部署不需要：
+`requirements-router.in` 直接引用原项目三份依赖清单，额外启用 HTTPX 的 SOCKS 支持。
+重新生成 ARM64 / Python 3.10 锁定清单：
 
 ```sh
 uv pip compile deploy/router/requirements-router.in \
-  -c main/xiaozhi-server/requirements.txt \
   --python-version 3.10 --python-platform aarch64-manylinux_2_36 \
-  --only-binary :all: -o deploy/router/requirements-router.txt
+  -o deploy/router/requirements-router.txt
 ```
 
-升级后重新验证 ARM64 依赖和服务启动。共享后台组件仍导入 Claude SDK，因此保留此 Python 依赖；默认配置不会启动 Claude Code。
+部分上游依赖（例如 jieba）只有源码分发，不能对整个依赖集合使用 `--only-binary :all:`。镜像包含编译工具，原生关键组件的 ARM64 wheel 可用性单独检查。
+检查范围和未验证项目见 [VALIDATION.txt](VALIDATION.txt)。不把“依赖已声明”当作所有功能在目标硬件已实测通过。

@@ -64,7 +64,7 @@
 ## ARM64 路由器 Docker 部署
 
 OpenWrt / ImmortalWrt 路由器以 API 为主运行时，可使用 [Docker 路由器部署说明](deploy/router/README.md)。
-此方案通过 `docker build` 和 `docker run` 部署，使用云端语音识别和大模型 API，不需要在宿主机安装 Python 或 Compose。
+此方案通过 `docker build` 和 `docker run` 部署，保留原项目功能和完整依赖，支持本地识别、云端 API、Claude Code、插件和记忆模块；宿主机不需要安装 Python 或 Compose。
 
 ## 快速开始
 

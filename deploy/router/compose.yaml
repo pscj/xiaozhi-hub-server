@@ -1,4 +1,4 @@
-# 可选：本路由器不需要安装 Compose，直接用 build.sh 和 start.sh。
+# Optional. Docker 20.10 can use build.sh / start.sh without Compose.
 services:
   hub:
     build:
@@ -7,20 +7,23 @@ services:
     image: xiaozhi-hub-router:local
     container_name: xiaozhi-hub
     restart: unless-stopped
-    mem_limit: 384m
-    memswap_limit: 384m
-    cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     environment:
       HUB_PUBLIC_HOST: ${LAN_IP:?请设置LAN_IP为路由器局域网IPv4地址}
+      HUB_DEFAULT_LLM: ${HUB_DEFAULT_LLM:-ClaudeAPI}
     ports:
       - "${LAN_IP}:16688:16688"
       - "${LAN_IP}:16689:16689"
     volumes:
-      - ./data:/app/data
-      - ./tmp:/app/tmp
+      - ./data:/opt/xiaozhi-hub/main/xiaozhi-server/data
+      - ./tmp:/opt/xiaozhi-hub/main/xiaozhi-server/tmp
+      - ./home:/home/xiaozhi
+      - models:/opt/xiaozhi-hub/main/xiaozhi-server/models
     logging:
       driver: json-file
       options:
         max-size: 5m
         max-file: "2"
+volumes:
+  models:
+    name: xiaozhi-hub-models

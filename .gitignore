@@ -204,3 +204,4 @@ main/xiaozhi-server/config/assets/wakeup_words/
 # Docker router deployment runtime state
 /deploy/router/data/
 /deploy/router/tmp/
+/deploy/router/home/

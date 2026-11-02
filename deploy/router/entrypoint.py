@@ -1,19 +1,55 @@
-"""Seed persistent configuration once, then run the upstream application."""
+"""Preserve upstream settings, initialize persistent state, then drop to a normal user."""
 import ipaddress
 import os
 from pathlib import Path
+import pwd
+import sys
+import yaml
 
-os.chdir('/app')
-Path('data').mkdir(exist_ok=True)
-Path('tmp').mkdir(exist_ok=True)
-config = Path('data/.config.yaml')
-if not config.exists():
-    host = str(ipaddress.IPv4Address(os.environ['HUB_PUBLIC_HOST']))
-    text = Path('/opt/router/config.router.yaml').read_text(encoding='utf-8')
-    # Exclusive creation protects existing keys and passwords on restarts.
+
+def initialize_config(server, root, router_config, host, default_llm='ClaudeAPI'):
+    config = server / 'data/.config.yaml'
+    if config.exists():
+        return
+    host = str(ipaddress.IPv4Address(host))
+    original = yaml.safe_load((root / 'scripts/config.template.yaml').read_text(encoding='utf-8'))
+    overrides = yaml.safe_load(router_config.read_text(encoding='utf-8').replace('ROUTER_LAN_IP', host))
+    original.setdefault('server', {}).update(overrides['server'])
+    original['selected_module']['LLM'] = default_llm
     fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as output:
-        output.write(text.replace('ROUTER_LAN_IP', host))
-    print('已生成 data/.config.yaml。请打开 /admin 设置密码及 API。', flush=True)
+        yaml.safe_dump(original, output, allow_unicode=True, sort_keys=False)
+    print('已按原安装模板初始化配置；现有配置在重启时不会被覆盖。', flush=True)
 
-os.execvp('python', ['python', 'app.py'])
+
+def main():
+    server = Path(os.environ.get('HUB_SERVER_DIR', '/opt/xiaozhi-hub/main/xiaozhi-server'))
+    root = server.parents[1]
+    home = Path('/home/xiaozhi')
+    os.chdir(server)
+    persistent = [server / 'data', server / 'tmp', server / 'models', home]
+    for directory in persistent:
+        directory.mkdir(parents=True, exist_ok=True)
+
+    # API is an initial preference, not a restriction on available providers.
+    initialize_config(server, root, Path('/opt/router/config.router.yaml'),
+                      os.environ['HUB_PUBLIC_HOST'], os.environ.get('HUB_DEFAULT_LLM', 'ClaudeAPI'))
+
+    user = pwd.getpwnam('xiaozhi')
+    if os.geteuid() == 0:
+        for directory in persistent:
+            os.chown(directory, user.pw_uid, user.pw_gid)
+            for current, dirs, files in os.walk(directory, followlinks=False):
+                for name in dirs + files:
+                    os.chown(Path(current) / name, user.pw_uid, user.pw_gid, follow_symlinks=False)
+        os.setgroups([])
+        os.setgid(user.pw_gid)
+        os.setuid(user.pw_uid)
+    os.environ['HOME'] = str(home)
+    os.environ['USER'] = os.environ['LOGNAME'] = user.pw_name
+    (home / 'xiaozhi-workspace').mkdir(exist_ok=True)
+    os.execv(sys.executable, [sys.executable, 'app.py'])
+
+
+if __name__ == '__main__':
+    main()

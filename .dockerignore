@@ -19,3 +19,4 @@ main/xiaozhi-server/tmp/
 main/xiaozhi-server/.claude/
 deploy/router/data/
 deploy/router/tmp/
+deploy/router/home/

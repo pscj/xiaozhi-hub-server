@@ -1,64 +1,8 @@
-# 大模型和语音识别是两个独立的 API 服务；密钥请在管理后台填写。
-# 初始化时 entrypoint 会用实际的路由器 LAN IP 替换 ROUTER_LAN_IP。
+# Only Docker network addresses are overridden here.
+# Model selections and feature configuration come from the original installer template.
 server:
   ip: 0.0.0.0
   http_port: 16688
   port: 16689
   websocket: ws://ROUTER_LAN_IP:16689/xiaozhi/v1/
   vision_explain: http://ROUTER_LAN_IP:16688/mcp/vision/explain
-
-selected_module:
-  VAD: SileroVAD
-  ASR: DoubaoStreamASRV2
-  LLM: CustomOpenAILLM
-  TTS: EdgeTTS
-  Memory: nomem
-  Intent: nointent
-
-tts_audio_prebuffer_count: 10
-delete_audio: true
-log:
-  log_level: WARNING
-  log_dir: tmp
-  data_dir: data
-
-LLM:
-  CustomOpenAILLM:
-    type: openai
-    base_url: https://api.example.com/v1
-    model_name: 你的模型名称
-    api_key: 你的大模型API密钥
-    max_tokens: 500
-    timeout:
-      connect: 10.0
-      read: 60.0
-      write: 10.0
-      pool: 5.0
-
-ASR:
-  DoubaoStreamASRV2:
-    type: doubao_stream
-    api_key: 你的豆包语音识别API密钥
-    appid: ""
-    access_token: ""
-    resource_id: volc.seedasr.sauc.duration
-    boosting_table_name: ""
-    correct_table_name: ""
-    enable_multilingual: false
-    end_window_size: 200
-    output_dir: tmp/
-  # 替代识别服务：将 selected_module.ASR 改成 RouterTranscriptionASR。
-  # 此处 base_url 必须是完整转写接口地址，不能只填 /v1。
-  # 此条目要手动编辑，原后台的识别界面主要支持豆包和本地识别。
-  RouterTranscriptionASR:
-    type: openai
-    base_url: https://api.example.com/v1/audio/transcriptions
-    api_key: 你的语音转写API密钥
-    model_name: 你的语音转写模型名称
-    output_dir: tmp/
-
-TTS:
-  EdgeTTS:
-    type: edge
-    voice: zh-CN-XiaoxiaoNeural
-    output_dir: tmp/
