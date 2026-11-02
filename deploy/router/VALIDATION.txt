@@ -1,0 +1,19 @@
+Validation: 2026-11-02
+Source commit: a6e9a8300025b5a2efd75dd4d6a37f36c55dab79
+
+PASS: ARM64 manylinux 2.36 / Python 3.10 dependency resolution with binary wheels only.
+PASS: Exact pinned requirements installed into a Python 3.10 x86_64 environment.
+PASS: Application startup using default router configuration, bundled Silero ONNX model and cloud ASR provider.
+PASS: Shell syntax, entrypoint Python syntax, Compose YAML parsing.
+PASS: ['/admin', 200, 117079]
+PASS: ['/admin/api/state', 200, 41]
+PASS: ['/xiaozhi/ota/', 200, 95]
+PASS: ['temporary test setup', 200]
+PASS: ['/admin/api/status', 200]
+PASS: ['/admin/api/asr', 200]
+PASS: ['/admin/api/llm', 200]
+PASS: ['/admin/api/pipeline', 200]
+PASS: ['WebSocket listener HTTP probe', 200]
+
+Not performed: Docker image build (Docker unavailable in this environment), ARM64 execution on target router, memory-limited execution, real ASR/LLM/TTS requests, device audio round trip, reboot mount/start ordering.
+No real API keys were used. Temporary test setup password, chat database, logs and configuration are excluded from the archive.

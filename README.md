@@ -61,6 +61,11 @@
 
 - 在网页上配置大模型和 API Key、Claude Code 的权限、称呼、插件、热词纠错和音色，查看在线设备和环境自检。
 
+## ARM64 路由器 Docker 部署
+
+OpenWrt / ImmortalWrt 路由器以 API 为主运行时，可使用 [Docker 路由器部署说明](deploy/router/README.md)。
+此方案通过 `docker build` 和 `docker run` 部署，使用云端语音识别和大模型 API，不需要在宿主机安装 Python 或 Compose。
+
 ## 快速开始
 
 开始前：电脑和设备连在同一个局域网，电脑上装好 git。要用 Claude Code 的话，先装好它并在终端运行一次 `claude` 登录；没装时会改用 Claude API，到管理后台填 API Key 就行。

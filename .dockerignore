@@ -5,3 +5,17 @@ __pycache__
 Dockerfile
 tmp/
 data/
+
+# Router / native-install runtime data and secrets must not enter images.
+**/__pycache__/
+**/.venv/
+**/.env
+**/.env.*
+**/.config.yaml
+**/.secrets.yaml
+**/.private_config.yaml
+main/xiaozhi-server/data/
+main/xiaozhi-server/tmp/
+main/xiaozhi-server/.claude/
+deploy/router/data/
+deploy/router/tmp/
