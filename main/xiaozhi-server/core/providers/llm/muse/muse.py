@@ -17,7 +17,11 @@ class LLMProvider(AgentProvider):
     def __init__(self, config):
         self.model_name = "Muse"
         self.voice_hint = str(config.get("voice_hint", "回复会被语音朗读，请简短口语化，不要使用表格或代码。") or "")
-        self._init_common(config, filler_default="交给 Muse 了", filler_delay_default=6)
+        # Retire the former built-in phrase even in older persisted configurations.
+        options = dict(config)
+        if options.get("first_reply_filler") == "交给 Muse 了":
+            options["first_reply_filler"] = ""
+        self._init_common(options, filler_default="", filler_delay_default=6)
         self.store = SessionStore(Path(get_project_dir()) / "data" / "agent_sessions.json", "muse")
         self.bridge = None
         self._start_loop()

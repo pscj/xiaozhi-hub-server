@@ -311,3 +311,11 @@ async def test_non_404_subscription_failure_never_sends_message():
     link = Forbidden()
     events = await collect(MuseSession(FakeBridge(link), 'chat', ''))
     assert isinstance(events[-1], Error) and not link.sent
+
+
+def test_muse_default_filler_is_silent_and_custom_phrase_remains(monkeypatch):
+    from core.providers.llm.muse import muse
+    monkeypatch.setattr(muse.LLMProvider, '_start_loop', lambda self: None)
+    for config in ({}, {'first_reply_filler': '交给 Muse 了'}, {'first_reply_filler': ''}):
+        assert muse.LLMProvider(config).filler == ''
+    assert muse.LLMProvider({'first_reply_filler': '请稍等'}).filler == '请稍等。'

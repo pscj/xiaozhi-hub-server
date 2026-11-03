@@ -661,7 +661,7 @@ LLM:
     display_name: Muse
     turn_timeout_seconds: 600
     idle_timeout_seconds: 300
-    first_reply_filler: "交给 Muse 了"
+    first_reply_filler: ""  # 留空时等待 Muse 回复，不播放填充语
     voice_hint: "回复会被语音朗读，请简短口语化，不要使用表格或代码。"
   # 所有openai类型均可以修改超参，以AliLLM为例
   # 当前支持的type为openai、dify、ollama，可自行适配
