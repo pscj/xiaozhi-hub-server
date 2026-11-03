@@ -205,3 +205,7 @@ main/xiaozhi-server/config/assets/wakeup_words/
 /deploy/router/data/
 /deploy/router/tmp/
 /deploy/router/home/
+
+# Redeployment backups contain credentials and must remain local.
+/deploy/router/backups/
+/deploy/router/.redeploy.lock/

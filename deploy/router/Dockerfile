@@ -18,11 +18,16 @@ RUN pip install --no-cache-dir uv \
     && python -c "import pathlib,claude_agent_sdk; p=pathlib.Path(claude_agent_sdk.__file__).parent/'_bundled'/'claude'; assert p.is_file(); pathlib.Path('/usr/local/bin/claude').symlink_to(p)" \
     && claude --version
 
+# Muse uses the same pinned runtime dependencies as the existing application.
+COPY main/xiaozhi-server/requirements-muse.txt /opt/router/requirements-muse.txt
+RUN uv pip install --system --no-cache -c /opt/router/requirements.txt -r /opt/router/requirements-muse.txt \
+    && python -c "import musegadget; from musegadget.muse_turn import MuseTurn"
+
 WORKDIR /opt/xiaozhi-hub/main/xiaozhi-server
 COPY main/xiaozhi-server/ ./
 COPY scripts/ /opt/xiaozhi-hub/scripts/
 COPY hub-docs/ /opt/xiaozhi-hub/hub-docs/
-COPY deploy/router/config.router.yaml deploy/router/entrypoint.py deploy/router/download_models.py /opt/router/
+COPY deploy/router/config.router.yaml deploy/router/entrypoint.py deploy/router/download_models.py deploy/router/redeploy_plan.py /opt/router/
 ARG HF_ENDPOINT=https://huggingface.co
 RUN HF_ENDPOINT="$HF_ENDPOINT" python /opt/router/download_models.py \
     && python -c "import runpy,pwd,pathlib; m=runpy.run_path('/opt/router/entrypoint.py'); u=pwd.getpwnam('xiaozhi'); m['prepare_writable_directories'](pathlib.Path.cwd(),pathlib.Path('/home/xiaozhi'),u.pw_uid,u.pw_gid)"

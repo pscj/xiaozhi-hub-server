@@ -28,7 +28,7 @@ musegadget pair
 
 网关服务必须设置同一个 `MUSEGADGET_STATE_DIR`，并能读取其中的身份、配对和 SDK Token。不要同时运行官方 `musegadget run` 服务：本 provider 已经持有唯一的注册连接，两个服务会竞争注册。配对命令不会常驻注册。
 
-Docker 环境建议在宿主 Linux 完成配对，将私有状态目录以可写卷挂载进容器（SDK 会刷新凭证），并设置状态目录变量；容器内也要安装 `requirements-muse.txt`。无需将蓝牙或 D-Bus 暴露给运行中的网关。现有 router 镜像不会自动安装这个可选依赖，应扩展镜像后再启用。
+Docker 环境建议在宿主 Linux 完成配对，将私有状态目录以可写卷挂载进容器（SDK 会刷新凭证），并设置状态目录变量；容器内也要安装 `requirements-muse.txt`。无需将蓝牙或 D-Bus 暴露给运行中的网关。新版 router 镜像已安装此依赖，拉取代码后执行 `sh deploy/router/redeploy.sh` 重建即可；脚本默认将 Muse 状态目录设为持久化的 `data/musegadget`，已有自定义持久化目录会沿用。
 
 ## 启用
 

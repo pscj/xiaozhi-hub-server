@@ -20,3 +20,7 @@ main/xiaozhi-server/.claude/
 deploy/router/data/
 deploy/router/tmp/
 deploy/router/home/
+
+# Deployment metadata/backups may contain secrets.
+deploy/router/backups/
+deploy/router/.redeploy.lock/
