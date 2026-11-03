@@ -124,3 +124,46 @@ async def test_muse_connection_does_not_start_during_pairing(paired_bridge):
             await MuseBridge().start()
     finally:
         bridge_module.release()
+
+
+async def test_ble_reconnect_uses_default_mtu(paired_bridge):
+    socket = Socket()
+    conn = SimpleNamespace(websocket=socket, loop=asyncio.get_running_loop())
+    bridge = bridge_module.start(conn, paired_bridge)
+    try:
+        await asyncio.wait_for(socket.messages.get(), 2)
+        bridge.receive(conn, {'pair_id': bridge.token, 'action': 'mtu', 'mtu': 247})
+        assert bridge.mtu() == 247
+        bridge.receive(conn, {'pair_id': bridge.token, 'action': 'disconnect'})
+        assert bridge.mtu() == 23
+        bridge.receive(conn, {'pair_id': bridge.token, 'action': 'write',
+                              'data': base64.b64encode(b'{"action":"get_device_info"}').decode()})
+        from musegadget.ble_framing import ChunkAssembler
+        assembler = ChunkAssembler()
+        response = None
+        while response is None:
+            message = await asyncio.wait_for(socket.messages.get(), 3)
+            packet = base64.b64decode(message['data'])
+            assert len(packet) <= 20
+            response = assembler.feed(packet)
+        assert json.loads(response)['type'] == 'device_info'
+    finally:
+        bridge.close()
+
+
+@pytest.mark.parametrize('delay, milliseconds', [(0.3, 300), (0.5, 500)])
+async def test_sdk_disconnect_delay_reaches_android(paired_bridge, delay, milliseconds):
+    socket = Socket()
+    conn = SimpleNamespace(websocket=socket, loop=asyncio.get_running_loop())
+    bridge = bridge_module.start(conn, paired_bridge)
+    try:
+        await asyncio.wait_for(socket.messages.get(), 2)
+        bridge.send_packets([b'error'])
+        bridge.disconnect(delay)
+        assert (await asyncio.wait_for(socket.messages.get(), 2))['action'] == 'notify'
+        message = await asyncio.wait_for(socket.messages.get(), 2)
+        assert message['action'] == 'disconnect'
+        assert message['delay_ms'] == milliseconds
+        assert message['pair_id'] == bridge.token
+    finally:
+        bridge.close()

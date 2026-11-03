@@ -57,7 +57,8 @@ class Bridge:
             time.sleep(.05)
 
     def disconnect(self, delay):
-        self.send('disconnect')
+        # Android waits for queued GATT notifications as well as this delay.
+        self.send('disconnect', delay_ms=max(0, round(delay * 1000)))
 
     def completed(self):
         if self.status != 'waiting': return
@@ -96,6 +97,7 @@ class Bridge:
             value = msg.get('mtu')
             if isinstance(value, int) and 23 <= value <= 517: self._mtu = value
         elif action == 'disconnect':
+            self._mtu = 23
             self.controller.on_disconnect()
         elif action == 'error':
             self.status = 'error'; self.error = '安卓设备蓝牙未开启、未授权，或不支持 BLE 广播'; self.controller.on_disconnect(); self.controller.stop(); self.timer.cancel(); release(self)
