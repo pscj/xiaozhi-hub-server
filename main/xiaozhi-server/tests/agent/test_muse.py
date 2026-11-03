@@ -218,7 +218,7 @@ async def test_owned_chat_accepts_parentless_reply_and_filters_previous_turn():
     assert [e.text for e in second if isinstance(e, TextDelta)] == ["回复2\n"]
 
 
-async def test_rejected_message_logs_status_without_message_or_secrets(monkeypatch):
+async def test_rejected_message_logs_raw_sdk_response(monkeypatch):
     from core.agent import muse_session
     class RejectedLink(FakeLink):
         async def send_chat(self, text, chat, output_modality):
@@ -229,15 +229,16 @@ async def test_rejected_message_logs_status_without_message_or_secrets(monkeypat
             return self
         def warning(self, message, *args):
             captured.append(message.format(*args))
+        def error(self, message, *args):
+            captured.append(message.format(*args))
     monkeypatch.setattr(muse_session, "logger", Logger())
     events = await collect(MuseSession(FakeBridge(RejectedLink()), "chat", ""))
     assert isinstance(events[-1], Error)
-    assert "发送消息并等待确认" in captured[0]
-    assert "403" in captured[0]
-    assert "secret-token" not in captured[0]
+    assert any("发送消息并等待确认" in line and "403" in line for line in captured)
+    assert any("secret-token" in line and "原始失败响应" in line for line in captured)
 
 
-async def test_unknown_error_does_not_log_sensitive_exception(monkeypatch):
+async def test_unknown_error_logs_raw_traceback(monkeypatch):
     from core.agent import muse_session
     class FailedLink(FakeLink):
         async def send_chat(self, text, chat, output_modality):
@@ -246,7 +247,29 @@ async def test_unknown_error_does_not_log_sensitive_exception(monkeypatch):
     class Logger:
         def bind(self, **kwargs): return self
         def warning(self, message, *args): captured.append(message.format(*args))
+        def error(self, message, *args): captured.append(message.format(*args))
     monkeypatch.setattr(muse_session, "logger", Logger())
     await collect(MuseSession(FakeBridge(FailedLink()), "chat", ""))
-    assert "RuntimeError" in captured[0]
-    assert "secret-token" not in captured[0] and "用户消息" not in captured[0]
+    assert any("RuntimeError" in line and "secret-token" in line and "Traceback" in line for line in captured)
+
+
+def test_sdk_logs_are_forwarded_once(monkeypatch):
+    import logging
+    from core.agent import muse_session
+    captured = []
+    class Logger:
+        def bind(self, **kwargs): return self
+        def log(self, level, message, *args): captured.append((level, message.format(*args)))
+    monkeypatch.setattr(muse_session, "logger", Logger())
+    sdk = logging.getLogger("musegadget")
+    old_handlers, old_level, old_propagate = sdk.handlers[:], sdk.level, sdk.propagate
+    try:
+        sdk.handlers.clear()
+        muse_session.configure_sdk_logging()
+        muse_session.configure_sdk_logging()
+        logging.getLogger("musegadget.service").warning("SDK raw error: %s", "detail")
+        assert captured == [("WARNING", "SDK raw error: detail")]
+    finally:
+        sdk.handlers[:] = old_handlers
+        sdk.setLevel(old_level)
+        sdk.propagate = old_propagate

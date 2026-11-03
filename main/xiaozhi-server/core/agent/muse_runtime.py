@@ -1,7 +1,7 @@
 """One Muse registration for the gateway, shared by all provider event loops."""
 import asyncio
 import contextlib
-from core.agent.muse_session import MuseBridge, MuseSession
+from core.agent.muse_session import MuseBridge, MuseSession, configure_sdk_logging
 from core.agent.agent_session import AgentSessionError, ErrorKind
 
 _current = None
@@ -9,6 +9,7 @@ _current = None
 
 class Runtime:
     def __init__(self, enabled):
+        configure_sdk_logging()
         self.loop = asyncio.get_running_loop()
         self.enabled = enabled
         self.bridge = MuseBridge()

@@ -1,6 +1,8 @@
 """官方 Muse Gadget SDK 的文字会话适配；音频继续由网关 ASR/TTS 处理。"""
 import asyncio
 import contextlib
+import logging
+import traceback
 import time
 import uuid
 
@@ -10,6 +12,19 @@ from core.agent.agent_session import (
 
 
 from loguru import logger
+
+
+class MuseSdkLogHandler(logging.Handler):
+    def emit(self, record):
+        logger.bind(tag=record.name).log(record.levelname if record.levelname in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL") else "INFO", "{}", self.format(record))
+
+
+def configure_sdk_logging():
+    sdk_logger = logging.getLogger("musegadget")
+    if not any(isinstance(handler, MuseSdkLogHandler) for handler in sdk_logger.handlers):
+        sdk_logger.addHandler(MuseSdkLogHandler())
+    sdk_logger.setLevel(logging.INFO)
+    sdk_logger.propagate = False
 
 
 def failure_reason(exc, stage):
@@ -220,6 +235,8 @@ class MuseSession(AgentSession):
             message = text + ("\n\n" + self.voice_hint if self.voice_hint else "")
             stage = "发送消息并等待确认"
             result = await asyncio.wait_for(session.send_chat(message, self._id, output_modality="text"), 30)
+            if not result.get("ok"):
+                logger.bind(tag="Muse").error("Muse send_chat 原始失败响应：{}", repr(result))
             ack = acknowledgement(result)
             details = ack.get("result", ack)
             if details.get("session_id") != self._id or details.get("is_thread") is not True:
@@ -252,6 +269,7 @@ class MuseSession(AgentSession):
         except Exception as exc:
             logger.bind(tag="Muse").warning("Muse 对话失败：阶段={}，错误类型={}，原因={}",
                                        stage, type(exc).__name__, failure_reason(exc, stage))
+            logger.bind(tag="Muse").error("Muse 对话原始异常与调用栈：\n{}", "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
             self.alive = False
             yield Error(ErrorKind.SERVER, voice=voice_for(ErrorKind.SERVER))
         finally:
