@@ -65,7 +65,7 @@ async def collect(session):
 async def test_reply_before_ack_and_other_chats_are_filtered():
     link = FakeLink([
         event("delta.message_done", "other", content="别人的回复"),
-        event("delta.message_done", "chat", parent="old", message="old", content="上一轮迟到"),
+        event("delta.message_done", "chat", parent="old-parent", message="old", content="上一轮迟到"),
         event("delta.message_done", "chat", content="你好。"),
         event("task.status", "chat", message="task", status="completed"),
     ])
@@ -199,3 +199,54 @@ async def test_bridge_registers_no_host_commands(monkeypatch):
         bridge.task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await bridge.task
+
+
+async def test_owned_chat_accepts_parentless_reply_and_filters_previous_turn():
+    class ParentlessLink(FakeLink):
+        async def send_chat(self, text, chat, output_modality):
+            self.sent.append((text, chat, output_modality))
+            n = len(self.sent)
+            if n == 2:
+                await self.queue.put(event("delta.message_done", chat, parent="", message="r1", content="旧回复"))
+            await self.queue.put(event("delta.message_done", chat, parent="", message=f"r{n}", content=f"回复{n}"))
+            return {"ok": True, "status": 200, "response": {"message_id": f"u{n}", "session_id": chat, "is_thread": True}}
+    link = ParentlessLink()
+    session = MuseSession(FakeBridge(link), "chat", voice_hint="")
+    first = await asyncio.wait_for(collect(session), 6)
+    second = await asyncio.wait_for(collect(session), 6)
+    assert [e.text for e in first if isinstance(e, TextDelta)] == ["回复1\n"]
+    assert [e.text for e in second if isinstance(e, TextDelta)] == ["回复2\n"]
+
+
+async def test_rejected_message_logs_status_without_message_or_secrets(monkeypatch):
+    from core.agent import muse_session
+    class RejectedLink(FakeLink):
+        async def send_chat(self, text, chat, output_modality):
+            return {"ok": False, "status": 403, "response": {"token": "secret-token"}}
+    captured = []
+    class Logger:
+        def bind(self, **kwargs):
+            return self
+        def warning(self, message, *args):
+            captured.append(message.format(*args))
+    monkeypatch.setattr(muse_session, "logger", Logger())
+    events = await collect(MuseSession(FakeBridge(RejectedLink()), "chat", ""))
+    assert isinstance(events[-1], Error)
+    assert "发送消息并等待确认" in captured[0]
+    assert "403" in captured[0]
+    assert "secret-token" not in captured[0]
+
+
+async def test_unknown_error_does_not_log_sensitive_exception(monkeypatch):
+    from core.agent import muse_session
+    class FailedLink(FakeLink):
+        async def send_chat(self, text, chat, output_modality):
+            raise RuntimeError("token=secret-token 用户消息")
+    captured = []
+    class Logger:
+        def bind(self, **kwargs): return self
+        def warning(self, message, *args): captured.append(message.format(*args))
+    monkeypatch.setattr(muse_session, "logger", Logger())
+    await collect(MuseSession(FakeBridge(FailedLink()), "chat", ""))
+    assert "RuntimeError" in captured[0]
+    assert "secret-token" not in captured[0] and "用户消息" not in captured[0]

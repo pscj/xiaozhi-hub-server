@@ -9,6 +9,33 @@ from core.agent.agent_session import (
 )
 
 
+from loguru import logger
+
+
+def failure_reason(exc, stage):
+    """Expose useful diagnostics without logging remote text or credentials."""
+    from musegadget.link_client import HttpStreamError, RequestRejected
+    if isinstance(exc, (HttpStreamError, RequestRejected)):
+        status = exc.status if type(exc.status) is int and 100 <= exc.status <= 599 else "未知"
+        return f"Muse 拒绝请求，HTTP 状态码={status}"
+    if isinstance(exc, asyncio.TimeoutError):
+        return {"订阅回复": "等待订阅确认超过 15 秒", "发送消息并等待确认": "等待发送确认超过 30 秒",
+                "等待设备注册": "等待设备注册超时"}.get(stage, "操作超时")
+    known = {
+        "Muse did not acknowledge the request": "Muse 未返回消息确认",
+        "Muse did not acknowledge the device side chat": "Muse 未确认设备专属对话",
+        "Muse did not acknowledge the gadget's dedicated side chat": "Muse 未确认设备专属对话",
+        "Muse chat acknowledgement omitted the user message ID": "Muse 消息确认缺少消息 ID",
+        "Muse returned an invalid chat acknowledgement": "Muse 返回的消息确认格式错误",
+        "Muse returned no correlated reply": "Muse 未返回可关联的回复",
+        "Muse subscription ended": "Muse 回复订阅意外结束",
+        "Muse session is not connected": "Muse 连接已断开",
+    }
+    if type(exc) in (ValueError, ConnectionError) and str(exc) in known:
+        return known[str(exc)]
+    return "未分类异常；未输出异常原文以保护消息和凭证"
+
+
 def voice_for(kind):
     if kind == ErrorKind.NOT_INSTALLED:
         return "还没有安装 Muse Gadget SDK，请先在服务器安装。"
@@ -120,6 +147,7 @@ class MuseSession(AgentSession):
         self.voice_hint = voice_hint
         self.alive = False
         self._interrupt = asyncio.Event()
+        self._replay_scope = None
 
     @property
     def session_id(self):
@@ -139,7 +167,7 @@ class MuseSession(AgentSession):
 
     async def send(self, text):
         from musegadget.link_client import acknowledgement
-        from musegadget.muse_turn import MuseTurn, Reply
+        from musegadget.muse_turn import MuseTurn, Reply, ReplayScope
 
         if self._interrupt.is_set():
             self._interrupt.clear()
@@ -150,6 +178,8 @@ class MuseSession(AgentSession):
         interrupted = asyncio.create_task(self._interrupt.wait())
         pump = None
         locked = False
+        turn = None
+        stage = "等待对话锁"
         try:
             yield Activity("init", tools_running=1)
             done, _ = await asyncio.wait({acquired, interrupted}, return_when=asyncio.FIRST_COMPLETED)
@@ -158,12 +188,15 @@ class MuseSession(AgentSession):
                 return
             await acquired
             locked = True
+            stage = "等待设备注册"
             session = await self.bridge.start()
             if self._interrupt.is_set():
                 yield Done(self._id, interrupted=True)
                 return
             queue = asyncio.Queue(maxsize=128)
-            turn = MuseTurn(self._id)
+            if self._replay_scope is None:
+                self._replay_scope = ReplayScope()
+            turn = MuseTurn(self._id, owns_chat=True, replay_scope=self._replay_scope)
 
             async def consume():
                 async for event in session.subscribe_chat(self._id):
@@ -178,18 +211,21 @@ class MuseSession(AgentSession):
                     if pump.done():
                         await pump
                     await asyncio.sleep(.02)
+            stage = "订阅回复"
             await asyncio.wait_for(subscribed(), 15)
             if self._interrupt.is_set():
                 yield Done(self._id, interrupted=True)
                 return
             yield Activity("init", tools_running=0)
             message = text + ("\n\n" + self.voice_hint if self.voice_hint else "")
+            stage = "发送消息并等待确认"
             result = await asyncio.wait_for(session.send_chat(message, self._id, output_modality="text"), 30)
             ack = acknowledgement(result)
             details = ack.get("result", ack)
             if details.get("session_id") != self._id or details.get("is_thread") is not True:
                 raise ValueError("Muse did not acknowledge the device side chat")
             turn.acknowledge(ack)
+            stage = "等待 Muse 回复"
             yield Activity("Muse", tools_running=1)
             # 只输出确认完成的回复，避免 Muse 最终修订文字被朗读两次。
             emitted = set()
@@ -213,7 +249,9 @@ class MuseSession(AgentSession):
             yield Done(self._id, interrupted=True)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            logger.bind(tag="Muse").warning("Muse 对话失败：阶段={}，错误类型={}，原因={}",
+                                       stage, type(exc).__name__, failure_reason(exc, stage))
             self.alive = False
             yield Error(ErrorKind.SERVER, voice=voice_for(ErrorKind.SERVER))
         finally:
@@ -222,6 +260,8 @@ class MuseSession(AgentSession):
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
+            if turn is not None:
+                turn.retire()
             # acquire 与 interrupt 同时完成时也须释放锁。
             if locked or (acquired.done() and not acquired.cancelled() and acquired.exception() is None and acquired.result()):
                 self.bridge.lock.release()
