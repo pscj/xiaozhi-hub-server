@@ -30,11 +30,15 @@ sh deploy/router/build.sh
 目录已存在时不要重复 clone。Python、系统依赖、CLI 和模型均装在镜像内，宿主机不需要 Python 或 Compose。
 完整构建可能耗时较长，也可能超出路由器可用内存；这时可在另一台 ARM64 Linux 机器构建后，用 `docker save` / `docker load` 导入相同镜像，功能不变。
 
-本地 X-ASR 下载较慢时可指定镜像站：
+默认先从 Hugging Face 下载本地 X-ASR，重试失败或文件不完整时自动改用 `hf-mirror.com`。切换下载源会清理当前文件的未完成下载，避免混用两个来源的数据。显式指定其他 `HF_ENDPOINT` 时只使用指定源。
+
+遇到模型下载 HTTP 503（下载服务暂时不可用）或下载较慢时，可直接指定镜像站重新构建：
 
 ```sh
 HF_ENDPOINT=https://hf-mirror.com sh deploy/router/build.sh
 ```
+
+重新构建时不要加 `--no-cache`，让 Docker 复用此前成功的依赖安装层。失败的模型下载步骤会重新执行；传统 Docker 构建不会保留失败层里的 `.part` 文件。
 
 ## 2. 启动
 
