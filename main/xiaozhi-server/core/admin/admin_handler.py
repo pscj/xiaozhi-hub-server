@@ -379,10 +379,12 @@ class AdminHandler:
         except ImportError:
             installed = False
         from core.agent import muse_pair_bridge
+        from core.agent import muse_runtime
+        registration = muse_runtime.snapshot()
         bridge = muse_pair_bridge.current()
         pairing = await self._blocking(lambda: (state / "pairing.json").is_file())
         token = await self._blocking(lambda: (state / "sdk_token").is_file() or bool(os.environ.get("MUSEGADGET_SDK_TOKEN")))
-        return self._json({"ok": True, "installed": installed, "paired": pairing,
+        return self._json({"ok": True, "installed": installed, "paired": pairing, "registration": registration,
                            "token_set": token, "pairing": bool(bridge and bridge.status == "waiting"), "pair_name": bridge.ident.ble_name if bridge else "", "pair_error": bridge.error if bridge else "", "devices": [x for x in connections.snapshot() if (getattr(connections.get(x["session_id"]), "features", None) or {}).get("muse_pair")], "enabled": bool((merged.get("LLM", {}).get("Muse") or {}).get("enabled")), "selected": (merged.get("selected_module") or {}).get("LLM") == "Muse"})
 
     async def handle_muse_save(self, request):
@@ -415,6 +417,8 @@ class AdminHandler:
                 entry["type"] = "muse"
                 entry["enabled"] = enabled
         await self._blocking(save)
+        from core.agent import muse_runtime
+        muse_runtime.changed(enabled=enabled)
         result = await self._apply_if_selected("LLM", "Muse", ["enabled"])
         return self._json({"ok": True, "note": result.get("note", "已保存")})
 
@@ -431,6 +435,8 @@ class AdminHandler:
         try:
             await self._blocking(muse_pair_bridge.reserve)
             try:
+                from core.agent import muse_runtime
+                await muse_runtime.pause()
                 # 停止所有正在使用同一凭证的 Muse 连接，防止刷新旧凭证覆盖新配对。
                 with llm_router._pool_lock:
                     instances = [item[1] for item in llm_router._pool.values()]
@@ -476,7 +482,13 @@ class AdminHandler:
             ok = await self._blocking(check)
         except (ImportError, OSError, ValueError):
             ok = False
-        return self._json({"ok": True, "reachable": ok, "note": "Muse 账号接口可访问；尚未验证对话连接" if ok else "无法验证配对，请检查配对和网络"})
+        from core.agent import muse_runtime
+        registration = muse_runtime.snapshot()
+        registered = registration["state"] == "online"
+        note = "Muse 账号可访问，设备已注册上线" if registered else "Muse 账号可访问；设备尚未注册上线，请查看注册状态"
+        return self._json({"ok": True, "reachable": ok, "registered": registered,
+                           "registration": registration,
+                           "note": note if ok else "账号接口检查失败，请检查配对和网络"})
 
     # ---------- Grok Bot ----------
 

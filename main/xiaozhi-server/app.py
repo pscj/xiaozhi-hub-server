@@ -68,6 +68,9 @@ async def main():
     gc_manager = get_gc_manager(interval_seconds=300)
     await gc_manager.start()
 
+    from core.agent import muse_runtime
+    muse_runtime.start(bool((config.get("LLM", {}).get("Muse") or {}).get("enabled")))
+
     # 启动 WebSocket 服务器
     ws_server = WebSocketServer(config)
     ws_task = asyncio.create_task(ws_server.start())
@@ -133,6 +136,7 @@ async def main():
     except asyncio.CancelledError:
         print("任务被取消，清理资源中...")
     finally:
+        await muse_runtime.close()
         # 停止全局GC管理器
         await gc_manager.stop()
 

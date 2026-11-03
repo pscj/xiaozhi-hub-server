@@ -117,6 +117,8 @@ def release(bridge=None):
     with _guard:
         if bridge is None or bridge is _current:
             _reserved = False
+            from core.agent import muse_runtime
+            muse_runtime.changed()
 
 
 def pairing_active():

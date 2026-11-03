@@ -25,12 +25,15 @@ class MuseBridge:
         self.task = None
         self.session = None
         self.lock = asyncio.Lock()
+        self.error = ""
 
-    async def start(self):
+    def launch(self):
         from core.agent import muse_pair_bridge
         if muse_pair_bridge.pairing_active():
             raise AgentSessionError(ErrorKind.AUTH, "正在重新配对")
         if self.task is None or self.task.done():
+            if self.task and not self.task.cancelled():
+                self.task.exception()
             try:
                 from musegadget import config
                 from musegadget.identity import load_or_create
@@ -40,6 +43,7 @@ class MuseBridge:
                 raise AgentSessionError(ErrorKind.NOT_INSTALLED) from exc
             if not config.load_json(config.PAIRING_FILE):
                 raise AgentSessionError(ErrorKind.AUTH)
+            self.error = ""
             bridge = self
 
             class ChatService(Service):
@@ -51,15 +55,47 @@ class MuseBridge:
 
                 async def serve(self, session, vm, stop):
                     bridge.session = session
+                    running = asyncio.create_task(session.run(stop))
+                    registered = asyncio.create_task(session.wait_registered(timeout=25))
                     try:
-                        return await session.run(stop)
+                        done, _ = await asyncio.wait({running, registered}, return_when=asyncio.FIRST_COMPLETED)
+                        if running not in done:
+                            await registered
+                            bridge.error = ""
+                        outcome = await running
+                        reasons = {"forbidden": "Muse 拒绝设备注册或连接", "auth_rejected": "Muse 拒绝连接认证",
+                                   "unpaired": "Muse 已解除设备配对", "closed": "Muse 连接已断开，正在重试"}
+                        bridge.error = reasons.get(outcome.value, "")
+                        return outcome
+                    except asyncio.TimeoutError:
+                        bridge.error = "Muse 注册超时，正在重试"
+                        raise
+                    except Exception:
+                        bridge.error = "连接或注册失败，请检查服务端 Muse 日志"
+                        raise
                     finally:
+                        for pending in (running, registered):
+                            pending.cancel()
+                            with contextlib.suppress(asyncio.CancelledError, Exception):
+                                await pending
                         if bridge.session is session:
                             bridge.session = None
 
             # 不实例化 Executor：不会授予 Muse system.run / file.* 等主机能力。
             self.service = ChatService(load_or_create(), None, sdk_token=config.sdk_token())
             self.task = asyncio.create_task(self.service.run())
+
+    async def stop(self):
+        if self.task:
+            self.service.stop()
+            self.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self.task
+        self.task = None
+        self.session = None
+
+    async def start(self):
+        self.launch()
         try:
             async def ready():
                 while True:

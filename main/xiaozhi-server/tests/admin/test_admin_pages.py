@@ -1039,3 +1039,12 @@ async def test_muse_repair_keeps_old_credentials_when_cancelled(client, tmp_path
         current = muse_pair_bridge.current()
         if current: current.close()
         connections.unregister(conn)
+
+
+async def test_muse_page_exposes_registration_without_credentials(client, monkeypatch):
+    from core.agent import muse_runtime
+    monkeypatch.setattr(muse_runtime, 'snapshot', lambda: {'state': 'connecting', 'error': 'Muse 拒绝设备注册或连接'})
+    response = await client.get('/admin/api/muse')
+    assert response.status == 200
+    body = await response.json()
+    assert body['registration'] == {'state': 'connecting', 'error': 'Muse 拒绝设备注册或连接'}

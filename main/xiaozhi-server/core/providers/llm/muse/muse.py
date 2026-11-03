@@ -1,11 +1,11 @@
 """Muse Gadget SDK provider，复用网关的 Agent 生命周期与语音输出。"""
 from pathlib import Path
 import asyncio
-import contextlib
 
 from config.config_loader import get_project_dir
 from core.agent.agent_session import AgentSessionError, Done, ErrorKind
-from core.agent.muse_session import MuseBridge, MuseSession, voice_for
+from core.agent.muse_session import voice_for
+from core.agent.muse_runtime import RuntimeSession as MuseSession
 from core.agent.session_store import SessionStore
 from core.providers.llm.claude_cli.claude_cli import LLMProvider as AgentProvider
 
@@ -32,11 +32,6 @@ class LLMProvider(AgentProvider):
                 if state.agent:
                     await state.agent.close()
                     state.agent = None
-            if self.bridge and self.bridge.task:
-                self.bridge.service.stop()
-                self.bridge.task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self.bridge.task
             self.bridge = None
         return asyncio.run_coroutine_threadsafe(pause(), self._loop)
 
@@ -52,8 +47,6 @@ class LLMProvider(AgentProvider):
     async def _ensure_agent(self, st, text, out, system_prompt):
         if st.agent and st.agent.alive:
             return False
-        if self.bridge is None:
-            self.bridge = MuseBridge()
         record = self.store.get(st.key) or {}
         agent = MuseSession(self.bridge, record.get("session_id"), self.voice_hint)
         await agent.start()

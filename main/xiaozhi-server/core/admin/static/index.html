@@ -1250,10 +1250,16 @@ async function renderIntent(root) {
   });
 }
 
+function museRegistration(r) {
+  const labels = {starting: "正在启动", online: "已注册上线", connecting: "正在连接 / 注册", pairing: "配对中，注册已暂停", disabled: "已停用", unpaired: "尚未配对", unavailable: "SDK 未安装", error: "注册服务异常", stopped: "注册服务未启动"};
+  return `<span class="pill ${r.state === "online" ? "ok" : "warn"}">${esc(labels[r.state] || "未知状态")}</span>${r.error ? `<p class="muted">${esc(r.error)}</p>` : ""}`;
+}
 async function renderMuse(root) {
   const d = await api("muse");
   root.innerHTML = `<div class="page-head"><div><h1>Muse</h1><p class="sub">配置 Muse 设备接入。</p></div><span class="pill ${d.paired ? "ok" : "warn"}">${d.paired ? "已保存配对" : "尚未配对"}</span></div>
-    <div class="card panel"><p>SDK：${d.installed ? "已安装" : "未安装"}　配对：${d.paired ? "已保存凭证，连接状态尚未验证" : "未配对"}</p>
+    <div class="card panel"><p>SDK：${d.installed ? "已安装" : "未安装"}　配对：${d.paired ? "已保存凭证" : "未配对"}</p>
+    <div id="muse-registration">${museRegistration(d.registration || {state: "stopped"})}</div>
+    <p class="muted small">启用后自动连接 Muse，配对成功及服务重启后自动注册上线。</p>
     <div class="banner info"><b>如何获取 SDK Token</b><br>
       1. 打开 <a href="https://gadgets.muse.ai/settings/sdk-tokens" target="_blank" rel="noopener noreferrer">Muse SDK Token 页面 ↗</a>，登录你的 Muse 账号。<br>
       2. 按页面提示阅读并同意 Gadget SDK 条款，然后生成 Token。<br>
@@ -1273,7 +1279,15 @@ async function renderMuse(root) {
   $("muse-cancel").onclick = e => busy(e.target, async () => { try { await api("muse/pair/cancel", {}); await openPage("muse", true); } catch (err) { toast(err.message, true); } });
   $("muse-default").onclick = e => busy(e.target, async () => { try { const r = await api("llm/use", {kind: "muse"}); toast(r.note); await openPage("muse", true); } catch (err) { toast(err.message, true); } });
   $("muse-test").onclick = e => busy(e.target, async () => { try { const r = await api("muse/test", {}); toast(r.note, !r.reachable); } catch (err) { toast(err.message, true); } });
-  if (d.pairing) page.timer = setInterval(async () => { if (!document.hidden && page.name === "muse") { try { const r = await api("muse", undefined, true); if (!r.pairing) await openPage("muse", true); } catch (e) { onDevicesError(e); } } }, 3000);
+  page.timer = setInterval(async () => {
+    if (document.hidden || page.name !== "muse") return;
+    try {
+      const r = await api("muse", undefined, true);
+      if (page.name !== "muse" || !root.isConnected) return;
+      $("muse-registration").innerHTML = museRegistration(r.registration || {state: "stopped"});
+      if (r.pairing !== d.pairing || r.paired !== d.paired) await openPage("muse", true);
+    } catch (e) { onDevicesError(e); }
+  }, 3000);
   $("muse-save").onclick = e => busy(e.target, async () => {
     try { const token = $("muse-token").value; const r = await api("muse", {token, enabled: $("muse-enabled").checked}); toast(token.trim() ? "Token 已保存；页面不显示原文" : r.note); await openPage("muse", true); }
     catch (err) { toast(err.message, true); }
