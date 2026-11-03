@@ -5,8 +5,10 @@ umask 077
 TASK_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH= cd -- "$TASK_DIR/../.." && pwd -P)
 cd "$REPO_ROOT"
+REBUILD=0
+if [ "${1:-}" = "--build" ]; then REBUILD=1; shift; fi
 case "${1:-}" in
-  --help|-h) echo '用法：sh deploy/router/redeploy.sh [首次部署的 LAN-IP]'; echo '先 git pull --ff-only，再执行本脚本；已有容器自动沿用原地址及持久化挂载。'; exit 0 ;;
+  --help|-h) echo '用法：sh deploy/router/redeploy.sh [--build] [首次部署的 LAN-IP]'; echo '先 git pull --ff-only，再执行本脚本；已有容器自动沿用原地址及持久化挂载。'; exit 0 ;;
 esac
 TIMEOUT=${HUB_DEPLOY_TIMEOUT:-300}
 case "$TIMEOUT" in ''|*[!0-9]*|0) echo 'HUB_DEPLOY_TIMEOUT 必须是正整数秒' >&2; exit 1 ;; esac
@@ -43,7 +45,7 @@ NEW_CREATED=0
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
-mkdir -p "$TASK_DIR/backups" "$TASK_DIR/data" "$TASK_DIR/tmp" "$TASK_DIR/home"
+mkdir -p "$TASK_DIR/backups" "$TASK_DIR/data" "$TASK_DIR/tmp" "$TASK_DIR/home" "$TASK_DIR/wakeup_words"
 chmod 700 "$TASK_DIR/backups"
 BACKUP=$(mktemp -d "$TASK_DIR/backups/$(date +%Y%m%d-%H%M%S)-XXXXXX")
 if docker inspect xiaozhi-hub >"$BACKUP/container.json" 2>/dev/null; then
@@ -55,13 +57,18 @@ fi
 LAN_IP=${1:-${LAN_IP:-}}
 if [ -z "$LAN_IP" ] && command -v uci >/dev/null 2>&1; then LAN_IP=$(uci -q get network.lan.ipaddr || true); fi
 LAN_IP=${LAN_IP%%/*}
-echo '1/5 构建当前源码和依赖（包含 Muse SDK）；此时不停止旧容器……'
-DOCKER_BUILDKIT=0 docker build -f deploy/router/Dockerfile \
-  --build-arg "HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}" -t "$IMAGE" .
+if [ "$HAD_OLD" = 1 ] && [ "$REBUILD" = 0 ]; then
+  IMAGE=$(docker inspect --format '{{.Image}}' xiaozhi-hub)
+  echo '1/5 沿用现有镜像，使用宿主机源码挂载。'
+else
+  echo '1/5 构建镜像和依赖；此时不停止旧容器……'
+  DOCKER_BUILDKIT=0 docker build -f deploy/router/Dockerfile \
+    --build-arg "HF_ENDPOINT=${HF_ENDPOINT:-https://huggingface.co}" -t "$IMAGE" .
+fi
 # Let the image's Python safely quote existing Docker parameters for the host shell.
 # No host Python, Compose or Docker socket mount is required.
-docker run --rm -i --network none --entrypoint python "$IMAGE" \
-  /opt/router/redeploy_plan.py "$IMAGE" "$TASK_DIR" "$BACKUP" "$LAN_IP" \
+docker run --rm -i --network none --mount "type=bind,source=$TASK_DIR/redeploy_plan.py,target=/tmp/redeploy_plan.py,readonly" --entrypoint python "$IMAGE" \
+  /tmp/redeploy_plan.py "$IMAGE" "$TASK_DIR" "$BACKUP" "$LAN_IP" \
   <"$BACKUP/container.json" >"$BACKUP/plan.sh"
 . "$BACKUP/plan.sh"
 echo '2/5 停止旧容器，备份配置、聊天、Claude 登录和 Muse 配对数据……'
@@ -86,7 +93,7 @@ while ! docker exec xiaozhi-hub python -c "import urllib.request; urllib.request
   fi
   sleep 5
 done
-docker tag "$IMAGE" xiaozhi-hub-router:local
+if [ "$REBUILD" = 1 ] || [ "$HAD_OLD" = 0 ]; then docker tag "$IMAGE" xiaozhi-hub-router:local; fi
 SUCCESS=1
 echo '5/5 部署完成。'
 if [ "$HAD_OLD" = 1 ]; then

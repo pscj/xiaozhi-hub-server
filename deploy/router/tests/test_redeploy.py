@@ -33,7 +33,7 @@ def original(root):
     }
 
 
-def test_plan_keeps_credentials_limits_and_state_but_uses_image_code(tmp_path):
+def test_plan_keeps_credentials_limits_and_mounts_checkout(tmp_path):
     info = original(tmp_path)
     args, backups = planner.plan([info], 'new:image', str(tmp_path), '/backup')
     assert shlex.split(shlex.join(args)) == args
@@ -41,6 +41,8 @@ def test_plan_keeps_credentials_limits_and_state_but_uses_image_code(tmp_path):
     assert str(512 * 1024 * 1024) in args
     assert any('source=xiaozhi-hub-models' in arg for arg in args)
     assert not any('target=' + planner.SERVER + '/core' in arg for arg in args)
+    assert any('target=' + planner.SERVER + ',readonly' in arg for arg in args)
+    assert any('target=' + planner.SERVER + '/config/assets/wakeup_words' in arg for arg in args)
     assert 'MUSEGADGET_STATE_DIR=' + planner.SERVER + '/data/musegadget' in args
     assert len(backups) == 2
 
@@ -81,11 +83,13 @@ if a[0] == 'info': pass
 elif a[0] == 'inspect':
     name = a[-1]
     if name not in state: sys.exit(1)
-    if '--format' in a: print(str(state[name]['State']['Running']).lower())
+    if '--format' in a:
+        if '{{.Image}}' in a: print('sha256:oldimage')
+        else: print(str(state[name]['State']['Running']).lower())
     else: print(json.dumps([state[name]]))
 elif a[0] == 'build': sys.exit(1 if os.environ.get('FAIL_BUILD') else 0)
 elif a[0] == 'run':
-    i = a.index('/opt/router/redeploy_plan.py')
+    i = a.index('/tmp/redeploy_plan.py')
     sys.exit(subprocess.call([sys.executable, os.environ['MOCK_PLAN']] + a[i+1:], stdin=sys.stdin))
 elif a[0] == 'rename': state[a[2]] = state.pop(a[1]); save()
 elif a[0] == 'stop': state[a[-1]]['State']['Running'] = False; save()
@@ -153,11 +157,14 @@ def test_success_backs_up_pairing_and_preserves_previous_container(deployment):
         assert archive.extractfile('./musegadget/pairing.json').read() == b'synthetic-pairing'
     assert not (task / '.redeploy.lock').exists()
     assert 'synthetic $x' not in result.stdout + result.stderr
-    assert next(i for i, a in enumerate(commands) if a[0] == 'build') < next(i for i, a in enumerate(commands) if a[0] == 'stop')
+    assert not any(a[0] == 'build' for a in commands)
 
 
 def test_build_failure_never_stops_existing_service(deployment):
-    result, state, commands = run(deployment, FAIL_BUILD='1')
+    task, state_path, log, env = deployment
+    result = subprocess.run(['sh', str(task / 'redeploy.sh'), '--build'], env={**env, 'FAIL_BUILD': '1'}, text=True, capture_output=True, timeout=15)
+    state = json.loads(state_path.read_text())
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
     assert result.returncode != 0
     assert state['xiaozhi-hub']['State']['Running']
     assert not any(a[0] in ('stop', 'rename', 'rm') for a in commands)

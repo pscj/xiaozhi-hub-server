@@ -14,6 +14,10 @@ def plan(inspected, image, task_dir, backup_dir, lan_ip=''):
     old = inspected[0] if inspected else None
     args = ['docker', 'create', '--name', 'xiaozhi-hub']
     backups = []
+    source_dir = os.path.abspath(os.path.join(task_dir, '../..', 'main/xiaozhi-server'))
+    cache_dir = os.path.join(task_dir, 'wakeup_words')
+    args += ['--mount', f'type=bind,source={source_dir},target={SERVER},readonly',
+             '--mount', f'type=bind,source={cache_dir},target={SERVER}/config/assets/wakeup_words']
     muse_state = None
     if old:
         host = old['HostConfig']
@@ -76,9 +80,9 @@ def plan(inspected, image, task_dir, backup_dir, lan_ip=''):
             raise ValueError('旧容器没有持久化 home；请先迁移 Claude 登录和用户目录再更新')
         for mount in mounts:
             target = mount['Destination']
-            if target == SERVER + '/core':
-                continue  # The rebuilt image owns this code, making image updates reproducible.
-            if target in (SERVER, '/opt/xiaozhi-hub', '/'):
+            if target in (SERVER, SERVER + '/core', SERVER + '/config/assets/wakeup_words'):
+                continue  # Use the current checkout and dedicated writable cache.
+            if target in ('/opt/xiaozhi-hub', '/'):
                 raise ValueError('检测到覆盖服务端源码的挂载，请沿用原部署工具更新')
             kind = mount['Type']
             if kind not in ('bind', 'volume'):
