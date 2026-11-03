@@ -973,6 +973,9 @@ async def test_muse_page_saves_token_privately_and_enables_model(client, tmp_pat
     status = await (await client.get('/admin/api/muse')).json()
     assert status['token_set'] and status['enabled']
     assert token not in str(status)
+    assert (await client.post('/admin/api/muse', json={'token': '', 'enabled': True})).status == 200
+    assert (state / 'sdk_token').read_text() == token
+    assert (await (await client.get('/admin/api/muse')).json())['token_set']
     assert client.handler.config['LLM']['Muse']['enabled'] is True
     assert (await client.post('/admin/api/muse', json={'token': 'invalid', 'enabled': True})).status == 400
     assert (state / 'sdk_token').read_text() == token
