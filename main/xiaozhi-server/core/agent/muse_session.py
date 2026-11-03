@@ -27,6 +27,9 @@ class MuseBridge:
         self.lock = asyncio.Lock()
 
     async def start(self):
+        from core.agent import muse_pair_bridge
+        if muse_pair_bridge.pairing_active():
+            raise AgentSessionError(ErrorKind.AUTH, "正在重新配对")
         if self.task is None or self.task.done():
             try:
                 from musegadget import config

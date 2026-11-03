@@ -425,10 +425,33 @@ class AdminHandler:
         conn = connections.get(str(body.get("session_id") or ""))
         if conn is None or not (getattr(conn, "features", None) or {}).get("muse_pair"):
             return self._error("请选择支持 Muse 配对的在线安卓设备", 400)
+        replace = body.get("replace", False)
+        if not isinstance(replace, bool):
+            return self._error("配置格式错误", 400)
         try:
-            bridge = await self._blocking(muse_pair_bridge.start, conn, self._muse_state_dir())
-        except (ImportError, ValueError, OSError) as e:
-            return self._error(str(e) or "无法启动配对", 400)
+            await self._blocking(muse_pair_bridge.reserve)
+            try:
+                # 停止所有正在使用同一凭证的 Muse 连接，防止刷新旧凭证覆盖新配对。
+                with llm_router._pool_lock:
+                    instances = [item[1] for item in llm_router._pool.values()]
+                if self.ws_server:
+                    instances.append(getattr(self.ws_server, "_llm", None))
+                instances.extend(getattr(connections.get(item["session_id"]), "llm", None)
+                                 for item in connections.snapshot())
+                seen = set()
+                for instance in instances:
+                    if instance is None or id(instance) in seen:
+                        continue
+                    seen.add(id(instance))
+                    pause = getattr(instance, "pause_for_pairing", None)
+                    if callable(pause):
+                        await asyncio.wait_for(asyncio.wrap_future(pause()), 10)
+                bridge = await self._blocking(muse_pair_bridge.start, conn, self._muse_state_dir(), replace, True)
+            except BaseException:
+                muse_pair_bridge.release()
+                raise
+        except (ImportError, ValueError, OSError, asyncio.TimeoutError) as e:
+            return self._error(str(e) or "无法启动配对，请稍后重试", 400)
         return self._json({"ok": True, "name": bridge.ident.ble_name})
 
     async def handle_muse_pair_cancel(self, request):

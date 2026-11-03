@@ -1,5 +1,7 @@
 """Muse Gadget SDK provider，复用网关的 Agent 生命周期与语音输出。"""
 from pathlib import Path
+import asyncio
+import contextlib
 
 from config.config_loader import get_project_dir
 from core.agent.agent_session import AgentSessionError, Done, ErrorKind
@@ -19,6 +21,24 @@ class LLMProvider(AgentProvider):
         self.store = SessionStore(Path(get_project_dir()) / "data" / "agent_sessions.json", "muse")
         self.bridge = None
         self._start_loop()
+
+    def pause_for_pairing(self):
+        async def pause():
+            with self._states_lock:
+                states = list(self._states.values())
+            for state in states:
+                if state.turn_task and not state.turn_task.done():
+                    state.turn_task.cancel()
+                if state.agent:
+                    await state.agent.close()
+                    state.agent = None
+            if self.bridge and self.bridge.task:
+                self.bridge.service.stop()
+                self.bridge.task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.bridge.task
+            self.bridge = None
+        return asyncio.run_coroutine_threadsafe(pause(), self._loop)
 
     def _voice_error(self, kind):
         return voice_for(kind)

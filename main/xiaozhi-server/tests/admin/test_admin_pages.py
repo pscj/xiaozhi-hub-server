@@ -1,6 +1,7 @@
 """管理后台页面接口：大模型、语音合成、意图识别的读写，切换失败回滚，表情单发。全部使用临时配置文件。"""
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1002,3 +1003,39 @@ async def test_muse_default_requires_enable_and_pairing(client, cfg_path, tmp_pa
     assert result.status == 200
     assert merged(cfg_path)['selected_module']['LLM'] == 'Muse'
     assert pages.llm_kind(merged(cfg_path)) == 'muse'
+
+
+async def test_muse_repair_keeps_old_credentials_when_cancelled(client, tmp_path, monkeypatch):
+    pytest.importorskip('musegadget')
+    from core.agent import muse_pair_bridge
+    state = tmp_path / 'muse-state'
+    state.mkdir()
+    monkeypatch.setenv('MUSEGADGET_STATE_DIR', str(state))
+    monkeypatch.delenv('MUSEGADGET_SDK_TOKEN', raising=False)
+    (state / 'sdk_token').write_text('mgst_' + 'A' * 43)
+    old = '{"access_token":"old","refresh_token":"old-refresh"}'
+    (state / 'pairing.json').write_text(old)
+    monkeypatch.setattr(muse_pair_bridge, '_current', None)
+    monkeypatch.setattr(muse_pair_bridge, '_reserved', False)
+    class Socket:
+        def __init__(self): self.messages = asyncio.Queue()
+        async def send(self, text): await self.messages.put(text)
+    socket = Socket()
+    conn = SimpleNamespace(session_id='muse-repair-test', device_id='android', client_ip='127.0.0.1',
+                           features={'muse_pair': True}, websocket=socket, loop=asyncio.get_running_loop())
+    connections.register(conn)
+    try:
+        response = await client.post('/admin/api/muse/pair', json={'session_id': conn.session_id})
+        assert response.status == 400
+        response = await client.post('/admin/api/muse/pair', json={'session_id': conn.session_id, 'replace': True})
+        assert response.status == 200
+        start = json.loads(await asyncio.wait_for(socket.messages.get(), 2))
+        assert start['action'] == 'start'
+        assert (state / 'pairing.json').read_text() == old
+        assert (await client.post('/admin/api/muse/pair/cancel', json={})).status == 200
+        assert (state / 'pairing.json').read_text() == old
+        assert not muse_pair_bridge.pairing_active()
+    finally:
+        current = muse_pair_bridge.current()
+        if current: current.close()
+        connections.unregister(conn)

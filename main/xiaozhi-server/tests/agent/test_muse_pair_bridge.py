@@ -85,3 +85,42 @@ async def test_cancelled_pairing_cannot_save_credentials(paired_bridge):
     with pytest.raises(ProvisionFailed):
         bridge.controller._provision(None, lambda save: save())
     assert not (paired_bridge / 'pairing.json').exists()
+
+
+async def test_repair_preserves_old_credentials_until_success(paired_bridge):
+    old = '{"access_token":"old","refresh_token":"old-refresh"}'
+    (paired_bridge / 'pairing.json').write_text(old)
+    socket = Socket()
+    conn = SimpleNamespace(websocket=socket, loop=asyncio.get_running_loop())
+    bridge = bridge_module.start(conn, paired_bridge, replace=True)
+    try:
+        await asyncio.wait_for(socket.messages.get(), 2)
+        assert bridge_module.pairing_active()
+        assert (paired_bridge / 'pairing.json').read_text() == old
+    finally:
+        bridge.close()
+    assert not bridge_module.pairing_active()
+    assert (paired_bridge / 'pairing.json').read_text() == old
+
+
+async def test_previous_bridge_cannot_release_new_reservation(paired_bridge):
+    conn = SimpleNamespace(websocket=Socket(), loop=asyncio.get_running_loop())
+    first = bridge_module.start(conn, paired_bridge)
+    first.close()
+    bridge_module.reserve()
+    try:
+        first.close()
+        assert bridge_module.pairing_active()
+    finally:
+        bridge_module.release()
+
+
+async def test_muse_connection_does_not_start_during_pairing(paired_bridge):
+    from core.agent.muse_session import MuseBridge
+    from core.agent.agent_session import AgentSessionError
+    bridge_module.reserve()
+    try:
+        with pytest.raises(AgentSessionError):
+            await MuseBridge().start()
+    finally:
+        bridge_module.release()
