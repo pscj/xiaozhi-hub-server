@@ -181,7 +181,7 @@ class MuseSession(AgentSession):
         await self.interrupt()
 
     async def send(self, text):
-        from musegadget.link_client import acknowledgement
+        from musegadget.link_client import acknowledgement, HttpStreamError
         from musegadget.muse_turn import MuseTurn, Reply, ReplayScope
 
         if self._interrupt.is_set():
@@ -218,16 +218,28 @@ class MuseSession(AgentSession):
                     await queue.put(event)
                 raise ConnectionError("Muse subscription ended")
 
-            # 在订阅就绪前不发送，否则会漏掉快速回复。
-            session.chat_subscribed.clear()
-            pump = asyncio.create_task(consume())
-            async def subscribed():
-                while not session.chat_subscribed.is_set():
-                    if pump.done():
-                        await pump
-                    await asyncio.sleep(.02)
+            async def subscribe():
+                nonlocal pump
+                session.chat_subscribed.clear()
+                pump = asyncio.create_task(consume())
+                async def subscribed():
+                    while not session.chat_subscribed.is_set():
+                        if pump.done():
+                            await pump
+                        await asyncio.sleep(.02)
+                await asyncio.wait_for(subscribed(), 15)
+
             stage = "订阅回复"
-            await asyncio.wait_for(subscribed(), 15)
+            try:
+                await subscribe()
+                new_chat = False
+            except HttpStreamError as exc:
+                if exc.status != 404:
+                    raise
+                # A new side chat is created by the first send, not subscribe.
+                new_chat = True
+                pump = None
+                logger.bind(tag="Muse").info("Muse 专属会话尚不存在，将通过首次发送创建")
             if self._interrupt.is_set():
                 yield Done(self._id, interrupted=True)
                 return
@@ -242,6 +254,9 @@ class MuseSession(AgentSession):
             if details.get("session_id") != self._id or details.get("is_thread") is not True:
                 raise ValueError("Muse did not acknowledge the device side chat")
             turn.acknowledge(ack)
+            if new_chat:
+                stage = "订阅回复"
+                await subscribe()
             stage = "等待 Muse 回复"
             yield Activity("Muse", tools_running=1)
             # 只输出确认完成的回复，避免 Muse 最终修订文字被朗读两次。

@@ -273,3 +273,41 @@ def test_sdk_logs_are_forwarded_once(monkeypatch):
         sdk.handlers[:] = old_handlers
         sdk.setLevel(old_level)
         sdk.propagate = old_propagate
+
+
+async def test_first_send_creates_missing_side_chat_then_receives_reply():
+    from musegadget.link_client import HttpStreamError
+    class NewChat(FakeLink):
+        def __init__(self):
+            super().__init__()
+            self.created = False
+            self.subscriptions = 0
+        async def subscribe_chat(self, chat):
+            self.subscriptions += 1
+            if not self.created:
+                raise HttpStreamError(404, '/chat/subscribe')
+            async for value in super().subscribe_chat(chat):
+                yield value
+        async def send_chat(self, text, chat, output_modality):
+            assert not self.created
+            self.created = True
+            self.sent.append((text, chat, output_modality))
+            await self.queue.put(event('delta.message_done', chat, content='你好'))
+            await self.queue.put(event('task.status', chat, status='completed'))
+            return {'ok': True, 'status': 200, 'response': {'message_id': 'u1', 'session_id': chat, 'is_thread': True}}
+    link = NewChat()
+    events = await asyncio.wait_for(collect(MuseSession(FakeBridge(link), 'chat', '')), 5)
+    assert len(link.sent) == 1 and link.subscriptions == 2
+    assert [e.text for e in events if isinstance(e, TextDelta)] == ['你好\n']
+    assert isinstance(events[-1], Done)
+
+
+async def test_non_404_subscription_failure_never_sends_message():
+    from musegadget.link_client import HttpStreamError
+    class Forbidden(FakeLink):
+        async def subscribe_chat(self, chat):
+            raise HttpStreamError(403, '/chat/subscribe')
+            yield
+    link = Forbidden()
+    events = await collect(MuseSession(FakeBridge(link), 'chat', ''))
+    assert isinstance(events[-1], Error) and not link.sent
