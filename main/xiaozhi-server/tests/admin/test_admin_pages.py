@@ -959,3 +959,43 @@ async def test_kiosk_muse_is_optional_and_selected_per_device(kiosk, cfg_path, m
     finally:
         connections.unregister(mine)
         connections.unregister(other)
+
+
+async def test_muse_page_saves_token_privately_and_enables_model(client, tmp_path, monkeypatch):
+    state = tmp_path / 'muse-state'
+    monkeypatch.setenv('MUSEGADGET_STATE_DIR', str(state))
+    monkeypatch.delenv('MUSEGADGET_SDK_TOKEN', raising=False)
+    token = 'mgst_' + 'A' * 43
+    response = await client.post('/admin/api/muse', json={'token': token, 'enabled': True})
+    assert response.status == 200
+    assert (state / 'sdk_token').read_text() == token
+    assert (state / 'sdk_token').stat().st_mode & 0o077 == 0
+    status = await (await client.get('/admin/api/muse')).json()
+    assert status['token_set'] and status['enabled']
+    assert token not in str(status)
+    assert client.handler.config['LLM']['Muse']['enabled'] is True
+    assert (await client.post('/admin/api/muse', json={'token': 'invalid', 'enabled': True})).status == 400
+    assert (state / 'sdk_token').read_text() == token
+    (state / 'pairing.json').write_text('{}')
+    assert (await client.post('/admin/api/muse', json={'token': token, 'enabled': True})).status == 409
+
+
+async def test_muse_pair_requires_login_and_capable_device(client):
+    assert (await client.post('/admin/api/muse/pair', json={'session_id': 'missing'})).status == 400
+    await client.post('/admin/api/logout', json={})
+    assert (await client.post('/admin/api/muse/pair', json={})).status == 401
+    assert (await client.get('/admin/api/muse')).status == 401
+
+
+async def test_muse_default_requires_enable_and_pairing(client, cfg_path, tmp_path, monkeypatch):
+    state = tmp_path / 'muse-state'
+    state.mkdir()
+    monkeypatch.setenv('MUSEGADGET_STATE_DIR', str(state))
+    assert (await client.post('/admin/api/llm/use', json={'kind': 'muse'})).status == 400
+    assert (await client.post('/admin/api/muse', json={'token': '', 'enabled': True})).status == 200
+    assert (await client.post('/admin/api/llm/use', json={'kind': 'muse'})).status == 400
+    (state / 'pairing.json').write_text('{}')
+    result = await client.post('/admin/api/llm/use', json={'kind': 'muse'})
+    assert result.status == 200
+    assert merged(cfg_path)['selected_module']['LLM'] == 'Muse'
+    assert pages.llm_kind(merged(cfg_path)) == 'muse'

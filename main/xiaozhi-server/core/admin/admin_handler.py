@@ -15,6 +15,9 @@ import asyncio
 import copy
 import functools
 import json
+import os
+import re
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -114,6 +117,11 @@ class AdminHandler:
                 web.post("/admin/api/call-names", self.handle_call_names_save),
                 web.post("/admin/api/call-names/learn", self.handle_call_names_learn),
                 web.post("/admin/api/call-names/learn/stop", self.handle_call_names_learn_stop),
+                web.get("/admin/api/muse", self.handle_muse),
+                web.post("/admin/api/muse", self.handle_muse_save),
+                web.post("/admin/api/muse/pair", self.handle_muse_pair),
+                web.post("/admin/api/muse/pair/cancel", self.handle_muse_pair_cancel),
+                web.post("/admin/api/muse/test", self.handle_muse_test),
                 web.get("/admin/api/grokbot", self.handle_grokbot),
                 web.post("/admin/api/grokbot/login", self.handle_grokbot_login),
                 web.post("/admin/api/grokbot/login/cancel", self.handle_grokbot_login_cancel),
@@ -357,6 +365,95 @@ class AdminHandler:
             conn = connections.get(item["session_id"])
             if conn is not None:
                 conn.config[key] = copy.deepcopy(value)
+
+    def _muse_state_dir(self):
+        return Path(os.environ.get("MUSEGADGET_STATE_DIR") or "/var/lib/musegadget")
+
+    async def handle_muse(self, request):
+        self._require_login(request)
+        merged = await self._blocking(self._merged)
+        state = self._muse_state_dir()
+        try:
+            import musegadget  # noqa: F401
+            installed = True
+        except ImportError:
+            installed = False
+        from core.agent import muse_pair_bridge
+        bridge = muse_pair_bridge.current()
+        pairing = await self._blocking(lambda: (state / "pairing.json").is_file())
+        token = await self._blocking(lambda: (state / "sdk_token").is_file() or bool(os.environ.get("MUSEGADGET_SDK_TOKEN")))
+        return self._json({"ok": True, "installed": installed, "paired": pairing,
+                           "token_set": token, "pairing": bool(bridge and bridge.status == "waiting"), "pair_name": bridge.ident.ble_name if bridge else "", "pair_error": bridge.error if bridge else "", "devices": [x for x in connections.snapshot() if (getattr(connections.get(x["session_id"]), "features", None) or {}).get("muse_pair")], "enabled": bool((merged.get("LLM", {}).get("Muse") or {}).get("enabled")), "selected": (merged.get("selected_module") or {}).get("LLM") == "Muse"})
+
+    async def handle_muse_save(self, request):
+        self._require_login(request)
+        body = await self._read_json(request)
+        token = body.get("token", "")
+        enabled = body.get("enabled")
+        if not isinstance(token, str) or not isinstance(enabled, bool):
+            return self._error("配置格式错误", 400)
+        token = token.strip()
+        if token and (self._muse_state_dir() / "pairing.json").exists():
+            return self._error("设备已配对；更换 Token 需要先解绑并重新配对", 409)
+        if token and os.environ.get("MUSEGADGET_SDK_TOKEN"):
+            return self._error("Token 由服务环境变量管理，无法在页面覆盖", 409)
+        if token and not re.fullmatch(r"mgst_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]", token):
+            return self._error("SDK Token 格式不正确", 400)
+        def save():
+            if token:
+                state = self._muse_state_dir()
+                state.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fd, tmp = tempfile.mkstemp(dir=state, prefix=".token-")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(token)
+                    os.replace(tmp, state / "sdk_token")
+                finally:
+                    if os.path.exists(tmp): os.unlink(tmp)
+            with config_store.edit_custom(self.config_path) as cfg:
+                entry = cfg.setdefault("LLM", {}).setdefault("Muse", {})
+                entry["type"] = "muse"
+                entry["enabled"] = enabled
+        await self._blocking(save)
+        result = await self._apply_if_selected("LLM", "Muse", ["enabled"])
+        return self._json({"ok": True, "note": result.get("note", "已保存")})
+
+    async def handle_muse_pair(self, request):
+        self._require_login(request)
+        body = await self._read_json(request)
+        from core.agent import muse_pair_bridge
+        conn = connections.get(str(body.get("session_id") or ""))
+        if conn is None or not (getattr(conn, "features", None) or {}).get("muse_pair"):
+            return self._error("请选择支持 Muse 配对的在线安卓设备", 400)
+        try:
+            bridge = await self._blocking(muse_pair_bridge.start, conn, self._muse_state_dir())
+        except (ImportError, ValueError, OSError) as e:
+            return self._error(str(e) or "无法启动配对", 400)
+        return self._json({"ok": True, "name": bridge.ident.ble_name})
+
+    async def handle_muse_pair_cancel(self, request):
+        self._require_login(request)
+        await self._read_json(request)
+        from core.agent import muse_pair_bridge
+        bridge = muse_pair_bridge.current()
+        if bridge: bridge.close()
+        return self._json({"ok": True})
+
+    async def handle_muse_test(self, request):
+        self._require_login(request)
+        await self._read_json(request)
+        def check():
+            from musegadget import config, muse_api
+            pairing = config.load_json(config.PAIRING_FILE, self._muse_state_dir())
+            if not pairing or not pairing.get("access_token"):
+                return False
+            vms, _ = muse_api.fetch_vms_with_status(pairing["access_token"], muse_api.api_root(pairing.get("api_url_v2", "")))
+            return bool(vms)
+        try:
+            ok = await self._blocking(check)
+        except (ImportError, OSError, ValueError):
+            ok = False
+        return self._json({"ok": True, "reachable": ok, "note": "Muse 账号接口可访问；尚未验证对话连接" if ok else "无法验证配对，请检查配对和网络"})
 
     # ---------- Grok Bot ----------
 
@@ -602,6 +699,12 @@ class AdminHandler:
         merged = await self._blocking(self._merged)
         if body.get("kind") == "cli":
             name = pages.CLAUDE_CLI_ENTRY
+        elif body.get("kind") == "muse":
+            name = "Muse"
+            if not llm_router.model_ready(merged, name):
+                return None, self._error("请先启用 Muse", 400)
+            if not (self._muse_state_dir() / "pairing.json").is_file():
+                return None, self._error("请先完成 Muse 配对", 400)
         else:
             vendor = catalog.VENDOR_BY_ID.get(str(body.get("vendor") or ""))
             if vendor is None:

@@ -70,6 +70,8 @@ def llm_kind(merged: dict, name: str = None) -> str:
         return "cli"
     if config_store.entry_type(merged, "LLM", name) == "grok_bot":
         return "grok"
+    if config_store.entry_type(merged, "LLM", name) == "muse":
+        return "muse"
     if name in catalog.VENDOR_BY_ENTRY and config_store.entry_type(merged, "LLM", name) == "openai":
         return "api"
     return "other"

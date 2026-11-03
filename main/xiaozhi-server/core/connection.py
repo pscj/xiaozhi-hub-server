@@ -284,6 +284,8 @@ class ConnectionHandler:
                     )
 
     async def _save_and_close(self, ws):
+        from core.agent import muse_pair_bridge
+        muse_pair_bridge.disconnected(self)
         """保存记忆并关闭连接"""
         try:
             # 守护线程1：独立生成标题（不依赖记忆模型）
@@ -375,6 +377,15 @@ class ConnectionHandler:
         # 不需要绑定，继续处理消息
 
         if isinstance(message, str):
+            if '"muse_pair"' in message and len(message) <= 1024:
+                try:
+                    payload = json.loads(message)
+                    if isinstance(payload, dict) and payload.get("type") == "muse_pair":
+                        from core.agent import muse_pair_bridge
+                        muse_pair_bridge.receive(self, payload)
+                        return
+                except (ValueError, TypeError):
+                    return
             await handleTextMessage(self, message)
         elif isinstance(message, bytes):
             if self.vad is None or self.asr is None:

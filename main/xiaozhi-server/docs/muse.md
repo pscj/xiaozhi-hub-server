@@ -4,48 +4,18 @@
 
 使用官方 [Muse Gadget SDK](https://github.com/facebookincubator/muse-gadget-sdk)，固定版本 `b166d88102a3e542c9666743dcb113e32ee35047`。Android 示例是视频测试工具，此处使用 Linux SDK。桥接只注册空命令列表，不调用官方 Executor，不开放主机执行命令或读写文件能力。
 
-## 安装与配对
+## 后台配置和手机配对
 
-运行主机需要 Python 3.10+、Linux、可用的 BLE 蓝牙适配器及 BlueZ。获取自己的 [SDK Token](https://gadgets.muse.ai/settings/sdk-tokens)，阅读 [Gadget SDK Terms](https://gadgets.muse.ai/sdk-terms)。不要将 Token 提交到仓库。
+1. 在后台打开主菜单的「Grok Bot」下方「Muse」，从页面链接申请 SDK Token，粘贴后保存并启用 Muse。Token 只保存在服务端私有状态目录，页面不回显。
+2. 安装支持 Muse 配对的安卓客户端，连接网关并打开安卓设备蓝牙。Android 12 及以上还需在客户端「设置 → 连接与语音」点击「授权 Muse 蓝牙配对」。
+3. 在后台 Muse 页面选择在线安卓设备并点击「开始配对」。在手机 Muse App 打开 Settings → Devices → Developer mode → Add Device，选择页面显示的 `MuseGadget` 设备。
+4. 配对完成后，可在该页设为默认模型，或在安卓端「选择模型」中选择 Muse。账号连接测试只检查设备凭证与 Muse API，并不表示语音对话已经验证。
 
-在运行网关的 Python 环境安装：
+蓝牙广播和 GATT 在安卓端运行，服务端通过已有设备连接处理官方 SDK 配对协议、校验并保存设备凭证；服务器不需要蓝牙。配对时小智设备需要能连接网关，网关需要访问 Muse。每次配对窗口最多 10 分钟，断开设备连接会结束窗口。
 
-```sh
-python -m pip install -r requirements-muse.txt
-```
+当前配对基于社区设备模式，按官方 SDK 要求在可信网络内操作。设备需支持 BLE 外围广播；Android 报告支持 BLE 并不必然代表支持外围广播。已有配对不会被新配对覆盖，更换 SDK Token 前需解除旧配对。
 
-配对依赖系统 `python3-dbus`、`python3-gi`、BlueZ。虚拟环境需使用系统 Python 并启用 `--system-site-packages`。按官方 Linux 指引将 `/etc/bluetooth/main.conf` 的 `[GATT] ExchangeMTU` 设为 `256`，避免手机长消息配对失败。
-
-用与网关相同的运行用户和状态目录操作（目录仅该用户可读写）：
-
-```sh
-export MUSEGADGET_STATE_DIR=/你的私有持久化目录/musegadget
-# 将 SDK Token 保存为状态目录下的 sdk_token 文件，权限 0600；或通过服务私有环境注入 MUSEGADGET_SDK_TOKEN。
-musegadget pair
-```
-
-手机 Muse：Settings → Devices → Developer mode → Add Device，选择终端打印的 `MuseGadgetXXXXXX`，确认社区设备并完成配对。Linux 已联网时选择显示的当前连接。`musegadget info` 可检查状态，但输出可能涉及凭证，不要公开。
-
-网关服务必须设置同一个 `MUSEGADGET_STATE_DIR`，并能读取其中的身份、配对和 SDK Token。不要同时运行官方 `musegadget run` 服务：本 provider 已经持有唯一的注册连接，两个服务会竞争注册。配对命令不会常驻注册。
-
-Docker 环境建议在宿主 Linux 完成配对，将私有状态目录以可写卷挂载进容器（SDK 会刷新凭证），并设置状态目录变量；容器内也要安装 `requirements-muse.txt`。无需将蓝牙或 D-Bus 暴露给运行中的网关。新版 router 镜像已安装此依赖，拉取代码后执行 `sh deploy/router/redeploy.sh` 重建即可；脚本默认将 Muse 状态目录设为持久化的 `data/musegadget`，已有自定义持久化目录会沿用。
-
-## 启用
-
-主配置已提供默认关闭的 `LLM.Muse` 示例，配对后将 `enabled` 设为 `true`。已有配置或管理后台覆盖配置的部署可在 `data/.config.yaml` 的 `LLM` 下添加：
-
-```yaml
-LLM:
-  Muse:
-    type: muse
-    enabled: true
-    display_name: Muse
-    turn_timeout_seconds: 600
-    idle_timeout_seconds: 300
-    voice_hint: "回复会被语音朗读，请简短口语化。"
-```
-
-重启网关后，安卓「选择模型」中选择 Muse。要作为默认模型，将 `selected_module.LLM` 设为 `Muse`，`selected_module.Intent` 设为 `nointent`。Memory/Intent 的其他模型调用仍需独立 API provider。只配置一个 Muse 类型条目，同一进程共享一条注册连接；不要多进程共享同一配对身份。
+Docker 部署请使用 `sh deploy/router/redeploy.sh` 重建包含 Muse SDK 的镜像。默认状态保存在持久化的 `data/musegadget` 中。完成真实账号配对和安卓音频验收前，不应将模拟测试视为端到端成功。
 
 ## 行为与限制
 

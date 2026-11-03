@@ -314,6 +314,7 @@
       <button data-page="llm"><span class="ico">✦</span>大模型</button>
       <button data-page="calls"><span class="ico">☎</span>呼名</button>
       <button data-page="grokbot"><span class="ico">☁</span>Grok Bot</button>
+      <button data-page="muse"><span class="ico">✧</span>Muse</button>
       <button data-page="memory"><span class="ico">✎</span>记忆</button>
       <button data-page="asr"><span class="ico">◐</span>语音识别</button>
       <button data-page="tts"><span class="ico">♪</span>语音合成</button>
@@ -426,7 +427,7 @@ $("auth-form").addEventListener("submit", async (ev) => {
 });
 $("logout").onclick = async () => { if (!confirmLeave()) return; page.dirty = null; await api("logout", {}); await route(); };
 
-const PAGES = { status: renderStatus, how: renderHow, llm: renderLLM, calls: renderCallNames, grokbot: renderGrokBot, memory: renderMemory, asr: renderASR, tts: renderTTS, intent: renderIntent, update: renderUpdate };
+const PAGES = { status: renderStatus, how: renderHow, llm: renderLLM, calls: renderCallNames, grokbot: renderGrokBot, muse: renderMuse, memory: renderMemory, asr: renderASR, tts: renderTTS, intent: renderIntent, update: renderUpdate };
 const page = { name: "", dirty: null, timer: null };
 function currentPage() { const p = location.hash.slice(1); return PAGES[p] ? p : "status"; }
 function confirmLeave() { return !(page.dirty && page.dirty()) || confirm("当前页面有修改还没保存，确定离开吗？"); }
@@ -1245,6 +1246,30 @@ async function renderIntent(root) {
   page.dirty = snapshot(values);
   $("intent-save").onclick = (e) => busy(e.target, async () => {
     try { const r = await api("intent", values()); toast(r.note, r.failed); page.dirty = null; await openPage("intent", true); }
+    catch (err) { toast(err.message, true); }
+  });
+}
+
+async function renderMuse(root) {
+  const d = await api("muse");
+  root.innerHTML = `<div class="page-head"><div><h1>Muse</h1><p class="sub">配置 Muse 设备接入。</p></div><span class="pill ${d.paired ? "ok" : "warn"}">${d.paired ? "已保存配对" : "尚未配对"}</span></div>
+    <div class="card panel"><p>SDK：${d.installed ? "已安装" : "未安装"}　配对：${d.paired ? "已保存凭证，连接状态尚未验证" : "未配对"}</p>
+    <label class="f">SDK Token <span class="hint">${d.token_set ? "已设置；留空保持不变" : "从 Muse Gadget SDK 页面获取"}</span><input class="in" id="muse-token" type="password" autocomplete="off"></label>
+    <label class="switch"><input type="checkbox" id="muse-enabled" ${d.enabled ? "checked" : ""}>启用 Muse 模型</label>
+    <p class="muted small">请选择在线安卓设备，允许蓝牙权限后，在 Muse 手机 App 中添加设备。</p>
+    ${d.pair_error ? `<div class="banner err">${esc(d.pair_error)}</div>` : ""}
+    ${!d.devices.length ? `<div class="banner warn">没有支持 Muse 配对的在线设备，请安装新版安卓客户端并连接网关。</div>` : ""}
+    ${d.pairing ? `<div class="banner info">正在等待手机配对，请选择 ${esc(d.pair_name)}。配对窗口持续 10 分钟。</div>` : ""}
+    <label class="f">配对设备<select class="in" id="muse-device">${(d.devices || []).map(x => `<option value="${esc(x.session_id)}">${esc(x.device_id || x.session_id)}</option>`).join("")}</select></label>
+    <div class="actions" style="justify-content:flex-start"><button class="btn" id="muse-pair" ${d.pairing || d.paired || !d.devices.length ? "disabled" : ""}>开始配对</button><button class="btn" id="muse-cancel" ${d.pairing ? "" : "disabled"}>取消配对</button><button class="btn" id="muse-test">测试账号连接</button></div>
+    <div class="actions"><a href="https://gadgets.muse.ai/settings/sdk-tokens" target="_blank" rel="noopener">获取 SDK Token ↗</a><button class="btn" id="muse-default" ${d.enabled && d.paired && !d.selected ? "" : "disabled"}>设为默认模型</button><button class="btn primary" id="muse-save">保存</button></div></div>`;
+  $("muse-pair").onclick = e => busy(e.target, async () => { try { await api("muse/pair", {session_id: $("muse-device").value}); await openPage("muse", true); } catch (err) { toast(err.message, true); } });
+  $("muse-cancel").onclick = e => busy(e.target, async () => { try { await api("muse/pair/cancel", {}); await openPage("muse", true); } catch (err) { toast(err.message, true); } });
+  $("muse-default").onclick = e => busy(e.target, async () => { try { const r = await api("llm/use", {kind: "muse"}); toast(r.note); await openPage("muse", true); } catch (err) { toast(err.message, true); } });
+  $("muse-test").onclick = e => busy(e.target, async () => { try { const r = await api("muse/test", {}); toast(r.note, !r.reachable); } catch (err) { toast(err.message, true); } });
+  if (d.pairing) page.timer = setInterval(async () => { if (!document.hidden && page.name === "muse") { try { const r = await api("muse", undefined, true); if (!r.pairing) await openPage("muse", true); } catch (e) { onDevicesError(e); } } }, 3000);
+  $("muse-save").onclick = e => busy(e.target, async () => {
+    try { const r = await api("muse", {token: $("muse-token").value, enabled: $("muse-enabled").checked}); toast(r.note); await openPage("muse", true); }
     catch (err) { toast(err.message, true); }
   });
 }
