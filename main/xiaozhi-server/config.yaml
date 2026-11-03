@@ -654,6 +654,15 @@ VAD:
     min_silence_duration_ms: 800  # 如果说话停顿比较长，可以把这个值设置大一些
 
 LLM:
+  # Muse 是可选依赖；先按 docs/muse.md 安装 SDK 并完成 Linux 蓝牙配对。
+  Muse:
+    type: muse
+    enabled: false  # 安装并配对完成后设为 true
+    display_name: Muse
+    turn_timeout_seconds: 600
+    idle_timeout_seconds: 300
+    first_reply_filler: "交给 Muse 了"
+    voice_hint: "回复会被语音朗读，请简短口语化，不要使用表格或代码。"
   # 所有openai类型均可以修改超参，以AliLLM为例
   # 当前支持的type为openai、dify、ollama，可自行适配
   AliLLM:

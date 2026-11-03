@@ -1,0 +1,3 @@
+# 可选 Muse 接入依赖；与网关现有 websockets==14.2 兼容。
+# 固定官方 SDK 源码，避免上游 0.1.0 同版本接口变更。
+musegadget @ git+https://github.com/facebookincubator/muse-gadget-sdk.git@b166d88102a3e542c9666743dcb113e32ee35047#subdirectory=linux

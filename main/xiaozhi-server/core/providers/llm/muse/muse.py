@@ -1,0 +1,48 @@
+"""Muse Gadget SDK provider，复用网关的 Agent 生命周期与语音输出。"""
+from pathlib import Path
+
+from config.config_loader import get_project_dir
+from core.agent.agent_session import AgentSessionError, Done, ErrorKind
+from core.agent.muse_session import MuseBridge, MuseSession, voice_for
+from core.agent.session_store import SessionStore
+from core.providers.llm.claude_cli.claude_cli import LLMProvider as AgentProvider
+
+
+class LLMProvider(AgentProvider):
+    AGENT_LABEL = "Muse"
+    BACKGROUND_TURNS = False
+
+    def __init__(self, config):
+        self.model_name = "Muse"
+        self.voice_hint = str(config.get("voice_hint", "回复会被语音朗读，请简短口语化，不要使用表格或代码。") or "")
+        self._init_common(config, filler_default="交给 Muse 了", filler_delay_default=6)
+        self.store = SessionStore(Path(get_project_dir()) / "data" / "agent_sessions.json", "muse")
+        self.bridge = None
+        self._start_loop()
+
+    def _voice_error(self, kind):
+        return voice_for(kind)
+
+    def abort(self, conn):
+        st = self._states.get(conn.session_id)
+        if st is not None:
+            st.abort_gen = st.turn_gen
+        super().abort(conn)
+
+    async def _ensure_agent(self, st, text, out, system_prompt):
+        if st.agent and st.agent.alive:
+            return False
+        if self.bridge is None:
+            self.bridge = MuseBridge()
+        record = self.store.get(st.key) or {}
+        agent = MuseSession(self.bridge, record.get("session_id"), self.voice_hint)
+        await agent.start()
+        if st.closed:
+            await agent.close()
+            raise AgentSessionError(ErrorKind.PROCESS_EXITED)
+        if getattr(st, "abort_gen", None) == st.turn_gen:
+            await agent.close()
+            out.put(Done(interrupted=True))
+            return True
+        st.agent = agent
+        return False

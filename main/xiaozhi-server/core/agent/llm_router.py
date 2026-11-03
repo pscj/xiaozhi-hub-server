@@ -75,6 +75,8 @@ def model_ready(config: dict, name: str) -> bool:
             return False
         if "api_key" in entry and _placeholder(entry.get("api_key")) and name != "CustomOpenAILLM":
             return False
+    if kind == "muse" and not entry.get("enabled", False):
+        return False
     if kind == "grok_bot" and not str(entry.get("bot_id") or "").strip():
         return False
     return True
@@ -118,7 +120,7 @@ def not_ready_reply(conn: "ConnectionHandler") -> Optional[str]:
 
 
 INTENT_MODES = ("nointent", "function_call")
-AGENT_TYPES = ("claude_cli", "grok_bot")  # 自己处理工具和对话的 Agent：不走 function_call
+AGENT_TYPES = ("claude_cli", "grok_bot", "muse")  # 自己处理工具和对话的 Agent：不走 function_call
 
 
 def _entry_type(config: dict, section: str, name: Optional[str]) -> Optional[str]:

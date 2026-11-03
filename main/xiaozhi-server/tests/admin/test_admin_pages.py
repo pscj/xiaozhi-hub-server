@@ -929,3 +929,33 @@ async def test_asr_use_and_doubao_endpoints(cfg_path, monkeypatch):
         r = await (await c.post("/admin/api/asr/use", json={"choice": "local"})).json()
         assert r["ok"] and loaded[-1] == "SherpaXASR"
         assert (await c.post("/admin/api/asr/use", json={"choice": "funasr"})).status == 400
+
+
+async def test_kiosk_muse_is_optional_and_selected_per_device(kiosk, cfg_path, monkeypatch):
+    switched = []
+    monkeypatch.setattr(llm_router, "switch", lambda conn, name, remember=True: switched.append((conn.session_id, name)))
+    custom = config_store.load_custom(cfg_path)
+    custom["LLM"]["Muse"] = {"type": "muse", "enabled": False}
+    config_store.save_custom(custom, cfg_path)
+    await kiosk.post("/admin/api/logout", json={})
+    data = await (await kiosk.get("/kiosk/llm")).json()
+    assert all(o["kind"] != "muse" for o in data["options"])
+    body = {"kind": "muse", "entry": "Muse", "device": "dev-muse"}
+    assert (await kiosk.post("/kiosk/llm/use", json=body)).status == 404
+    custom["LLM"]["Muse"]["enabled"] = True
+    config_store.save_custom(custom, cfg_path)
+    mine = SimpleNamespace(session_id="muse-1", device_id="dev-muse", client_ip="127.0.0.1")
+    other = SimpleNamespace(session_id="muse-2", device_id="other-device", client_ip="127.0.0.1")
+    connections.register(mine)
+    connections.register(other)
+    try:
+        data = await (await kiosk.get("/kiosk/llm")).json()
+        assert any(o["kind"] == "muse" and o["entry"] == "Muse" for o in data["options"])
+        assert (await kiosk.post("/kiosk/llm/use", json=body)).status == 200
+        assert switched == [("muse-1", "Muse")]
+        data = await (await kiosk.get("/kiosk/llm?device=dev-muse")).json()
+        assert data["selected"] == "Muse" and data["default"] == "ClaudeCLI"
+        assert (await kiosk.post("/kiosk/llm/use", json={**body, "entry": "ClaudeCLI"})).status == 404
+    finally:
+        connections.unregister(mine)
+        connections.unregister(other)

@@ -651,6 +651,10 @@ class AdminHandler:
                                "entry": pages.CLAUDE_CLI_ENTRY, "model": data["claude"]["values"].get("model", "")})
         options += [{"kind": "grok", "vendor": "grok_bot", "label": b["bot_name"], "entry": b["entry"], "model": "Grok Bot"}
                     for b in data["grok"]["bots"] if llm_router.model_ready(merged, b["entry"])]
+        options += [{"kind": "muse", "vendor": "muse", "label": e.get("display_name") or "Muse",
+                     "entry": name, "model": "Muse"}
+                    for name, e in (merged.get("LLM") or {}).items()
+                    if isinstance(e, dict) and e.get("type") == "muse" and llm_router.model_ready(merged, name)]
         selected = data["selected"]
         if device:
             name = (llm_router.store().get(device) or {}).get("model")
@@ -677,6 +681,11 @@ class AdminHandler:
             name = str(body.get("entry") or "")
             if name not in {b["entry"] for b in pages.grok_entries(merged)} or not llm_router.model_ready(merged, name):
                 return self._error("没有这个 Grok Bot，请先在管理后台的 Grok Bot 页勾选", 404)
+        elif kind == "muse":
+            name = str(body.get("entry") or "")
+            if ((merged.get("LLM", {}).get(name) or {}).get("type") != "muse"
+                    or not llm_router.model_ready(merged, name)):
+                return self._error("没有配置这个 Muse 条目", 404)
         elif kind == "cli":
             name = pages.CLAUDE_CLI_ENTRY
             if name not in (merged.get("LLM") or {}):
