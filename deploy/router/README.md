@@ -149,3 +149,20 @@ uv pip compile deploy/router/requirements-router.in \
 
 部分上游依赖（例如 jieba）只有源码分发，不能对整个依赖集合使用 `--only-binary :all:`。镜像包含编译工具，原生关键组件的 ARM64 wheel 可用性单独检查。
 检查范围和未验证项目见 [VALIDATION.txt](VALIDATION.txt)。不把“依赖已声明”当作所有功能在目标硬件已实测通过。
+
+## 7. 修复旧容器的唤醒词缓存权限错误
+
+若日志出现 `PermissionError: config/assets/wakeup_words`，这是早期 Docker 启动脚本漏建可写缓存目录造成的，服务会在导入阶段退出。当前版本在切换普通用户前创建并赋权此目录，镜像构建也增加了普通用户读写检查。
+
+已存在容器可以先更新启动文件，不必重新安装依赖或删除容器：
+
+```sh
+cd /mnt/data/xiaozhi-hub-server
+git pull --ff-only
+docker stop xiaozhi-hub
+docker cp deploy/router/entrypoint.py xiaozhi-hub:/opt/router/entrypoint.py
+docker start xiaozhi-hub
+docker logs --tail 80 xiaozhi-hub
+```
+
+这只修复现有容器的启动文件，不改变镜像。之后重新构建镜像，确保未来新建容器也包含修复。配置、聊天记录、模型卷和 Claude 登录挂载保持不变。

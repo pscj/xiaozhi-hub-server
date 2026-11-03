@@ -27,3 +27,12 @@ The native-provider startup test uses the necessary runtime dependencies in an
 isolated x86_64 Python environment, not a claimed full-image or ARM64 test.
 No actual user credentials were used; temporary test data is not committed.
 No core server/agent/provider implementation was changed by this Docker revision.
+
+Wake-word permissions fix (2026-11-03):
+- Startup now prepares config/assets/wakeup_words before dropping privileges.
+- Docker build includes a USER xiaozhi check that instantiates the actual
+  WakeupWordsConfig and writes temporary files in the cache and data directories.
+- Python syntax and local cache creation/ownership preparation checks passed.
+- The current execution environment cannot switch UID (setgroups returns EPERM),
+  and has no Docker; the image-level non-root check has not been executed here.
+- The earlier root-only startup test did not cover this permissions issue.

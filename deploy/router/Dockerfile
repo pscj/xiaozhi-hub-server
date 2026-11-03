@@ -24,7 +24,13 @@ COPY scripts/ /opt/xiaozhi-hub/scripts/
 COPY hub-docs/ /opt/xiaozhi-hub/hub-docs/
 COPY deploy/router/config.router.yaml deploy/router/entrypoint.py deploy/router/download_models.py /opt/router/
 ARG HF_ENDPOINT=https://huggingface.co
-RUN HF_ENDPOINT="$HF_ENDPOINT" python /opt/router/download_models.py
+RUN HF_ENDPOINT="$HF_ENDPOINT" python /opt/router/download_models.py \
+    && python -c "import runpy,pwd,pathlib; m=runpy.run_path('/opt/router/entrypoint.py'); u=pwd.getpwnam('xiaozhi'); m['prepare_writable_directories'](pathlib.Path.cwd(),pathlib.Path('/home/xiaozhi'),u.pw_uid,u.pw_gid)"
+
+# Catch permission regressions using the same user as the running application.
+USER xiaozhi
+RUN python -c "import tempfile; from core.utils.wakeup_word import WakeupWordsConfig; c=WakeupWordsConfig(); f=tempfile.TemporaryFile(dir=c.assets_dir); f.write(b'permission-check'); f.close(); f=tempfile.TemporaryFile(dir='data'); f.close()"
+USER root
 
 EXPOSE 16688 16689
 HEALTHCHECK --interval=60s --timeout=5s --start-period=180s --retries=3 \

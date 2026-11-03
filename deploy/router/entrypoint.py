@@ -22,26 +22,33 @@ def initialize_config(server, root, router_config, host, default_llm='ClaudeAPI'
     print('已按原安装模板初始化配置；现有配置在重启时不会被覆盖。', flush=True)
 
 
+def prepare_writable_directories(server, home, uid, gid):
+    writable = [server / 'data', server / 'tmp', server / 'models', home,
+                server / 'config/assets/wakeup_words']
+    for directory in writable:
+        directory.mkdir(parents=True, exist_ok=True)
+        if os.geteuid() == 0:
+            os.chown(directory, uid, gid)
+            for current, dirs, files in os.walk(directory, followlinks=False):
+                for name in dirs + files:
+                    os.chown(Path(current) / name, uid, gid, follow_symlinks=False)
+
+
 def main():
     server = Path(os.environ.get('HUB_SERVER_DIR', '/opt/xiaozhi-hub/main/xiaozhi-server'))
     root = server.parents[1]
     home = Path('/home/xiaozhi')
     os.chdir(server)
-    persistent = [server / 'data', server / 'tmp', server / 'models', home]
-    for directory in persistent:
-        directory.mkdir(parents=True, exist_ok=True)
+    user = pwd.getpwnam('xiaozhi')
+    prepare_writable_directories(server, home, user.pw_uid, user.pw_gid)
 
     # API is an initial preference, not a restriction on available providers.
     initialize_config(server, root, Path('/opt/router/config.router.yaml'),
                       os.environ['HUB_PUBLIC_HOST'], os.environ.get('HUB_DEFAULT_LLM', 'ClaudeAPI'))
 
-    user = pwd.getpwnam('xiaozhi')
     if os.geteuid() == 0:
-        for directory in persistent:
-            os.chown(directory, user.pw_uid, user.pw_gid)
-            for current, dirs, files in os.walk(directory, followlinks=False):
-                for name in dirs + files:
-                    os.chown(Path(current) / name, user.pw_uid, user.pw_gid, follow_symlinks=False)
+        # initialize_config creates a root-owned 0600 file after directory setup.
+        os.chown(server / 'data/.config.yaml', user.pw_uid, user.pw_gid)
         os.setgroups([])
         os.setgid(user.pw_gid)
         os.setuid(user.pw_uid)
