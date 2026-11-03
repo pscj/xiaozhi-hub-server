@@ -45,6 +45,10 @@ NEW_CREATED=0
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
+# Docker cannot create nested mount points after the source tree is mounted read-only.
+SOURCE_DIR="$REPO_ROOT/main/xiaozhi-server"
+[ -f "$SOURCE_DIR/app.py" ] && [ -d "$SOURCE_DIR/config/assets" ] || { echo '找不到完整的服务端源码，请检查仓库目录' >&2; exit 1; }
+mkdir -p "$SOURCE_DIR/data" "$SOURCE_DIR/tmp" "$SOURCE_DIR/models" "$SOURCE_DIR/config/assets/wakeup_words"
 mkdir -p "$TASK_DIR/backups" "$TASK_DIR/data" "$TASK_DIR/tmp" "$TASK_DIR/home" "$TASK_DIR/wakeup_words"
 chmod 700 "$TASK_DIR/backups"
 BACKUP=$(mktemp -d "$TASK_DIR/backups/$(date +%Y%m%d-%H%M%S)-XXXXXX")

@@ -119,6 +119,9 @@ def deployment(tmp_path):
     repo = tmp_path / 'repo'
     task = repo / 'deploy/router'
     task.mkdir(parents=True)
+    server = repo / 'main/xiaozhi-server'
+    (server / 'config/assets').mkdir(parents=True)
+    (server / 'app.py').write_text('# fake server')
     for name in ('redeploy.sh', 'redeploy_plan.py'):
         shutil.copy(ROUTER / name, task / name)
     for name in ('data', 'tmp', 'home', 'core'):
@@ -158,6 +161,8 @@ def test_success_backs_up_pairing_and_preserves_previous_container(deployment):
     assert not (task / '.redeploy.lock').exists()
     assert 'synthetic $x' not in result.stdout + result.stderr
     assert not any(a[0] == 'build' for a in commands)
+    source = task.parent.parent / 'main/xiaozhi-server'
+    assert all((source / name).is_dir() for name in ('data', 'tmp', 'models', 'config/assets/wakeup_words'))
 
 
 def test_build_failure_never_stops_existing_service(deployment):
