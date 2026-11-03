@@ -7,8 +7,8 @@
 
 页面使用的接口（/admin/api/llm、asr、tts、intent 等）只暴露后台要管理的内容，并做取值校验。
 
-本机设备接口（/kiosk/*）给和网关装在同一台机器上的设备客户端用（例如带屏幕的语音终端），不用登录，
-只接受本机直接发来的请求，见 _from_this_machine。
+设备接口（/kiosk/*）给局域网内的设备客户端用（例如带屏幕的语音终端），不用登录，
+允许直接访问及经反向代理转发的请求。
 """
 
 import asyncio
@@ -628,15 +628,7 @@ class AdminHandler:
                 result["note"] += f"；配置里没有 {intent}，请检查意图识别"
         return name, result
 
-    # ---------- 本机设备接口 ----------
-
-    @staticmethod
-    def _from_this_machine(request: web.Request) -> bool:
-        """请求直接来自本机。经过反向代理转发来的（带 X-Forwarded-For / Forwarded）不算：
-        代理和网关在同一台机器上时来源地址也是 127.0.0.1，但发起请求的可能是任何人。"""
-        if "X-Forwarded-For" in request.headers or "Forwarded" in request.headers:
-            return False
-        return request.remote in ("127.0.0.1", "::1")
+    # ---------- 设备接口 ----------
 
     async def handle_kiosk_llm(self, request: web.Request):
         """可选的模型（装了 Claude Code 的话排第一个，然后是配好的 API 厂商、勾选的 Grok Bot）和当前选中的。
@@ -644,8 +636,6 @@ class AdminHandler:
         带 ?device=<device-id> 时，selected 是这台设备实际会用的模型：它上次切到的（呼名或在这里切换），
         还可用的话；default 始终是后台默认模型。
         """
-        if not self._from_this_machine(request):
-            return self._error("仅限本机", 403)
         merged = await self._blocking(self._merged)
         return self._json({"ok": True, **await self._kiosk_models(merged, request.query.get("device"))})
 
@@ -677,8 +667,6 @@ class AdminHandler:
 
         返回切换后的模型列表（同 GET /kiosk/llm?device=…），设备不用再查一次。
         """
-        if not self._from_this_machine(request):
-            return self._error("仅限本机", 403)
         body = await self._read_json(request)
         device = str(body.get("device") or "")
         if not device:
@@ -733,8 +721,6 @@ class AdminHandler:
         quiet：设备是否在睡眠时段（期间不主动念）。每次查询都带上，网关重启后不会丢。
         play：用户点了"有一条待汇报"，马上在设备的连接上念（睡眠时段也念）；playing 表示已安排，设备没连着时为 false。
         """
-        if not self._from_this_machine(request):
-            return self._error("仅限本机", 403)
         body = await self._read_json(request)
         device = str(body.get("device") or "")
         if not device:
@@ -749,8 +735,6 @@ class AdminHandler:
         用服务已经加载、所有连接共用的本机识别模型（设备客户端用它复核唤醒词）。
         当前识别不是本机模型（如豆包流式）时返回 501，客户端据此跳过复核。
         """
-        if not self._from_this_machine(request):
-            return self._error("仅限本机", 403)
         asr = getattr(self.ws_server, "_asr", None)
         if not callable(getattr(asr, "recognize_pcm", None)):
             return self._error("当前语音识别不是本机模型", 501)
@@ -766,8 +750,6 @@ class AdminHandler:
 
         返回 {"models": {条目名: [{id, role: user|bot, text, time, interrupted}]}}，每个模型最近 limit 条
         （默认 chat_history.display_limit）。"""
-        if not self._from_this_machine(request):
-            return self._error("仅限本机", 403)
         device = request.query.get("device") or ""
         if not device:
             return self._error("缺少 device", 400)
@@ -784,8 +766,6 @@ class AdminHandler:
 
         只清本机：库里的记录和记忆、在线连接里网关这边的对话；Claude Code、Grok Bot 自己的会话和记忆不碰。
         memory_only：只清记忆，记录留着。返回 {"deleted", "agents": 聊过的 Claude Code / Grok Bot}。"""
-        if not self._from_this_machine(request):
-            return self._error("仅限本机", 403)
         body = await self._read_json(request)
         device = str(body.get("device") or "")
         if not device:

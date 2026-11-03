@@ -528,17 +528,20 @@ def test_sherpa_recognize_pcm():
     assert seen["rate"] == 16000 and list(seen["samples"]) == [0.5, -0.5]
 
 
-async def test_kiosk_only_from_this_machine(kiosk, monkeypatch):
-    calls = [("get", "/kiosk/llm", None), ("post", "/kiosk/llm/use", {"kind": "cli"}),
-             ("post", "/kiosk/reports", {"device": "dev-1"}), ("post", "/kiosk/asr", None),
-             ("get", "/kiosk/chat/history?device=dev-1", None), ("post", "/kiosk/chat/clear", {"device": "dev-1"})]
-    for method, path, body in calls:  # 本机反向代理转发来的不算本机
-        r = await getattr(kiosk, method)(path, json=body, headers={"X-Forwarded-For": "203.0.113.5"})
-        assert r.status == 403
-    monkeypatch.setattr(web.BaseRequest, "remote", property(lambda self: "192.168.1.20"))  # 局域网里的其他电脑
-    for method, path, body in calls:
-        r = await getattr(kiosk, method)(path, json=body)
-        assert r.status == 403 and (await r.json())["error"] == "仅限本机"
+@pytest.mark.parametrize("headers", [{}, {"X-Forwarded-For": "192.168.1.20"},
+                                     {"Forwarded": "for=192.168.1.20"}])
+async def test_kiosk_access_from_lan(kiosk, monkeypatch, headers):
+    await kiosk.post("/admin/api/logout", json={})
+    monkeypatch.setattr(web.BaseRequest, "remote", property(lambda self: "192.168.1.20"))
+    calls = [("get", "/kiosk/llm", None, 200),
+             ("post", "/kiosk/llm/use", {"kind": "cli"}, 400),
+             ("post", "/kiosk/reports", {"device": "dev-1"}, 200),
+             ("post", "/kiosk/asr", None, 501),
+             ("get", "/kiosk/chat/history?device=dev-1", None, 200),
+             ("post", "/kiosk/chat/clear", {}, 400)]
+    for method, path, body, expected in calls:
+        r = await getattr(kiosk, method)(path, json=body, headers=headers)
+        assert r.status == expected, await r.text()
 
 
 async def test_vendor_test_endpoint(client, monkeypatch):
