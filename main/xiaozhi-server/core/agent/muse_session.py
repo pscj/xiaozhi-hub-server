@@ -273,6 +273,7 @@ class MuseBridge:
                         raise ConnectionError("Muse session rotated")
                     await asyncio.sleep(0.02)
                 state["ready"].set()
+                logger.bind(tag="Muse").info("订阅泵已订阅聊天，开始接收事件")
                 await stream
             except asyncio.CancelledError:
                 raise
@@ -300,6 +301,7 @@ class MuseBridge:
             return
         task = asyncio.create_task(self._watch(session_id, device_key))
         self._watchers[session_id] = {"task": task, "key": device_key}
+        logger.bind(tag="Muse").info("常驻监听已启动，设备={}", device_key)
 
     def _report_proactive(self, session_id, device_key, message_id, text):
         self._remember(self._consumed, session_id, message_id)
@@ -331,9 +333,11 @@ class MuseBridge:
                     continue
                 pending.pop(message_id, None)
                 if message_id in self._claims.get(session_id, ()) or message_id in self._consumed.get(session_id, ()):
+                    logger.bind(tag="Muse").info("常驻监听：一条消息已被回合认领或处理过，跳过")
                     self._remember(self._consumed, session_id, message_id)
                     continue
                 text = (item["final"] or item["text"] or "").strip()
+                logger.bind(tag="Muse").info("常驻监听收到完整消息：{}", text[:40])
                 if not text.startswith(PROACTIVE_MARKER):
                     # 专属聊天里的普通消息（如 App 对话回复）：不念，记下避免重放再处理
                     self._remember(self._consumed, session_id, message_id)
@@ -389,6 +393,10 @@ class MuseBridge:
                     continue
                 handle(event)
                 flush()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.bind(tag="Muse").exception("常驻监听异常退出，等待下次会话启动时重建")
         finally:
             self.unlisten(session_id, queue)
 
