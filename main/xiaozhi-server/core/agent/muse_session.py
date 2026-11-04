@@ -107,6 +107,7 @@ class MuseBridge:
         self._watchers = {}  # session_id -> {"task": Task, "key": 设备 ID}
         self._claims = {}  # session_id -> OrderedDict[message_id, None]：已被某轮回合认领的回复
         self._consumed = {}  # session_id -> OrderedDict[message_id, None]：已处理（认领或已汇报）的消息
+        self._pumps = {}  # session_id -> 订阅泵状态：每个聊天只有一条订阅流，回合与 watcher 共用
 
     def launch(self):
         from core.agent import muse_pair_bridge
@@ -170,6 +171,9 @@ class MuseBridge:
         for watcher in self._watchers.values():
             watcher["task"].cancel()
         self._watchers.clear()
+        for state in self._pumps.values():
+            state["task"].cancel()
+        self._pumps.clear()
         if self.task:
             self.service.stop()
             self.task.cancel()
@@ -198,6 +202,94 @@ class MuseBridge:
         """已处理过的消息 ID，供新回合的 ReplayScope 退休，避免重放被误认成本轮回复。"""
         return set(self._consumed.get(session_id, ()))
 
+    # ---------- 单一订阅泵：一个聊天只有一条订阅流，回合与 watcher 都是听众 ----------
+    # 同一 LinkSession 上并行开两条订阅会互相竞争（chat_subscribed 是会话级标记，
+    # 服务端也只认一条），后开的会让先开的静默失聪。所以订阅统一由泵持有一条，
+    # 事件扇出给所有听众队列；会话轮换、断线重连都在泵内处理，听众无感。
+
+    def _ensure_pump(self, session_id):
+        state = self._pumps.get(session_id)
+        if state is None:
+            state = {"listeners": set(), "ready": asyncio.Event(), "task": None,
+                     "attempt": 0, "missing_attempt": 0}
+            state["task"] = asyncio.create_task(self._pump(session_id, state))
+            self._pumps[session_id] = state
+        return state
+
+    def listen(self, session_id):
+        """登记一个听众队列并返回它；事件由订阅泵扇出。用完须 unlisten。"""
+        state = self._ensure_pump(session_id)
+        queue = asyncio.Queue(maxsize=512)
+        state["listeners"].add(queue)
+        return queue
+
+    def unlisten(self, session_id, queue):
+        state = self._pumps.get(session_id)
+        if state is not None:
+            state["listeners"].discard(queue)
+
+    async def wait_ready(self, session_id, timeout=15):
+        """等这个聊天的订阅就绪。聊天尚不存在时抛 HttpStreamError(404)，与直连订阅一致。"""
+        from musegadget.link_client import HttpStreamError
+
+        state = self._ensure_pump(session_id)
+        entry_attempt = state["attempt"]
+        deadline = time.monotonic() + timeout
+        while True:
+            if state["ready"].is_set():
+                return
+            # 等待期间又失败了一次且是 404：聊天确实尚不存在（而不是上一轮的旧标记）
+            if state["missing_attempt"] > entry_attempt:
+                raise HttpStreamError(404, "/chat/subscribe")
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError()
+            await asyncio.sleep(0.02)
+
+    async def _pump(self, session_id, state):
+        while True:
+            session = self.session
+            if session is None or not session.registered.is_set():
+                state["ready"].clear()
+                await asyncio.sleep(0.5)
+                continue
+            async def run_stream():
+                async for event in session.subscribe_chat(session_id):
+                    for queue in list(state["listeners"]):
+                        if queue.full():  # 听众消费太慢：丢最旧的，不能拖住泵
+                            with contextlib.suppress(asyncio.QueueEmpty):
+                                queue.get_nowait()
+                        queue.put_nowait(event)
+                raise ConnectionError("Muse subscription ended")
+
+            state["attempt"] += 1
+            stream = asyncio.create_task(run_stream())
+            try:
+                # 固定版本的 SDK 没有 opened 回调；订阅被接受时它会自己点亮
+                # chat_subscribed，而现在只有泵会订阅，靠这个标记判断就绪。
+                while not session.chat_subscribed.is_set():
+                    if stream.done():
+                        await stream
+                    if self.session is not session:
+                        raise ConnectionError("Muse session rotated")
+                    await asyncio.sleep(0.02)
+                state["ready"].set()
+                await stream
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                from musegadget.link_client import HttpStreamError
+
+                state["ready"].clear()
+                if isinstance(exc, HttpStreamError) and exc.status == 404:
+                    state["missing_attempt"] = state["attempt"]  # 聊天尚不存在：等首次发送创建后自动就绪
+                else:
+                    logger.bind(tag="Muse").info("订阅泵中断（{}），稍后重连", type(exc).__name__)
+                await asyncio.sleep(2)
+            finally:
+                stream.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stream
+
     def ensure_watcher(self, session_id, device_key):
         """保证这个专属聊天有一条常驻订阅在收主动消息。须在桥所在事件循环里调用。"""
         if not session_id or not device_key:
@@ -221,12 +313,11 @@ class MuseBridge:
             logger.bind(tag="Muse").warning("主动消息放入待汇报箱失败，设备={}", device_key)
 
     async def _watch(self, session_id, device_key):
-        """常驻订阅一个专属聊天：回合之外的完整回复组装后，带播报标记的进待汇报箱。
+        """常驻监听一个专属聊天：回合之外的完整回复组装后，带播报标记的进待汇报箱。
 
-        与回合的订阅并行存在（同一 LinkSession 上另开一条订阅流）。回合认领过的
-        回复按 message_id 跳过；组装顺序与 SDK 的 MuseTurn 一致，但不经过它——
-        没有 ack 的 MuseTurn 不产出事件。订阅断开（会话轮换、聊天尚不存在等）
-        自动重连，未完成的组装保留，重放靠已处理 ID 去重。"""
+        事件来自桥的单一订阅泵（与回合共用同一条订阅流）。回合认领过的回复按
+        message_id 跳过；组装顺序与 SDK 的 MuseTurn 一致，但不经过它——没有 ack
+        的 MuseTurn 不产出事件。未完成的组装保留，重放靠已处理 ID 去重。"""
         pending = {}  # message_id -> {"text": 累积增量, "final": str|None, "done_at": float|None}
 
         def flush():
@@ -288,39 +379,18 @@ class MuseBridge:
                         pending.pop(old_id, None)
                         break
 
-        while True:
-            session = self.session
-            if session is None or not session.registered.is_set():
-                await asyncio.sleep(0.5)
-                continue
-            queue = asyncio.Queue(maxsize=128)
-
-            async def consume():
-                async for event in session.subscribe_chat(session_id):
-                    await queue.put(event)
-                raise ConnectionError("Muse subscription ended")
-
-            pump = asyncio.create_task(consume())
-            try:
-                while self.session is session and not pump.done():
-                    try:
-                        event = await asyncio.wait_for(queue.get(), 0.2)
-                    except asyncio.TimeoutError:
-                        flush()
-                        continue
-                    handle(event)
+        queue = self.listen(session_id)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), 0.2)
+                except asyncio.TimeoutError:
                     flush()
-                if pump.done():
-                    await pump
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.bind(tag="Muse").info("主动消息订阅中断（{}），稍后重连", type(exc).__name__)
-                await asyncio.sleep(2)
-            finally:
-                pump.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await pump
+                    continue
+                handle(event)
+                flush()
+        finally:
+            self.unlisten(session_id, queue)
 
     async def start(self):
         self.launch()
@@ -382,6 +452,7 @@ class MuseSession(AgentSession):
         acquired = asyncio.create_task(self.bridge.lock.acquire())
         interrupted = asyncio.create_task(self._interrupt.wait())
         pump = None
+        listener_q = None
         locked = False
         turn = None
         stage = "等待对话锁"
@@ -408,13 +479,26 @@ class MuseSession(AgentSession):
                 # 免得订阅重放时被误认成本轮的回复
                 self._replay_scope.retire(("message", mid) for mid in consumed_ids(self._id))
 
+            # 有订阅泵的桥（正式 MuseBridge）走泵：整个会话只有一条订阅流，
+            # 回合与 watcher 都是听众；没有泵的桥（测试替身）直连订阅。
+            bridge_listen = getattr(self.bridge, "listen", None)
+
             async def consume():
+                if listener_q is not None:
+                    while True:
+                        await queue.put(await listener_q.get())
                 async for event in session.subscribe_chat(self._id):
                     await queue.put(event)
                 raise ConnectionError("Muse subscription ended")
 
             async def subscribe():
-                nonlocal pump
+                nonlocal pump, listener_q
+                if bridge_listen is not None:
+                    if listener_q is None:
+                        listener_q = bridge_listen(self._id)
+                        pump = asyncio.create_task(consume())
+                    await self.bridge.wait_ready(self._id, 15)
+                    return
                 session.chat_subscribed.clear()
                 pump = asyncio.create_task(consume())
                 async def subscribed():
@@ -433,7 +517,8 @@ class MuseSession(AgentSession):
                     raise
                 # A new side chat is created by the first send, not subscribe.
                 new_chat = True
-                pump = None
+                if bridge_listen is None:
+                    pump = None
                 logger.bind(tag="Muse").info("Muse 专属会话尚不存在，将通过首次发送创建")
             if self._interrupt.is_set():
                 yield Done(self._id, interrupted=True)
@@ -491,6 +576,8 @@ class MuseSession(AgentSession):
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
+            if listener_q is not None:
+                self.bridge.unlisten(self._id, listener_q)
             if turn is not None:
                 turn.retire()
             # acquire 与 interrupt 同时完成时也须释放锁。

@@ -183,3 +183,111 @@ async def test_turn_claims_reply_and_seeds_retirements():
     assert bridge.claimed == [("chat", "r1")]
     assert ("message", "old-proactive") in session._replay_scope.ids
     assert events[-1].__class__.__name__ == "Done"
+
+
+# ---------- 单一订阅泵：回合与 watcher 共用一条订阅流 ----------
+
+class PumpLink(WatchLink):
+    """带订阅计数的假传输，send_chat 后把预置事件推入订阅队列。"""
+
+    def __init__(self, events=None):
+        super().__init__()
+        self.events = events or []
+        self.sent = []
+        self.subscriptions = 0
+
+    async def subscribe_chat(self, chat):
+        self.subscriptions += 1
+        async for value in super().subscribe_chat(chat):
+            yield value
+
+    async def send_chat(self, text, chat, output_modality):
+        self.sent.append((text, chat, output_modality))
+        for raw in self.events:
+            await self.queue.put(raw)
+        return {"ok": True, "status": 200,
+                "response": {"message_id": "u1", "session_id": chat, "is_thread": True}}
+
+
+class PumpBridge:
+    """回合侧替身：锁和 start 自己提供，订阅泵三件套委托给真正的 MuseBridge。"""
+
+    def __init__(self, link):
+        self.lock = asyncio.Lock()
+        self.link = link
+        self.real = MuseBridge()
+        self.real.session = link
+
+    async def start(self):
+        return self.link
+
+    def listen(self, session_id):
+        return self.real.listen(session_id)
+
+    def unlisten(self, session_id, queue):
+        self.real.unlisten(session_id, queue)
+
+    async def wait_ready(self, session_id, timeout=15):
+        return await self.real.wait_ready(session_id, timeout)
+
+    def claim(self, session_id, message_id):
+        self.real.claim(session_id, message_id)
+
+    def consumed_ids(self, session_id):
+        return self.real.consumed_ids(session_id)
+
+    def ensure_watcher(self, session_id, device_key):
+        self.real.ensure_watcher(session_id, device_key)
+
+
+async def test_turn_and_watcher_share_one_subscription(inbox):
+    link = PumpLink([
+        event("delta.message_done", "chat", parent="u1", message="r1", content="你好。"),
+        event("task.status", "chat", message="task", status="completed"),
+    ])
+    bridge = PumpBridge(link)
+    session = MuseSession(bridge, "chat", voice_hint="", device_key="device-1")
+    await session.start()  # 武装 watcher（订阅泵的第一位听众）
+    events = [ev async for ev in session.send("你好")]
+    assert events[-1].__class__.__name__ == "Done"
+    # 回合的回复已被认领，watcher 不重复汇报；整个过程只开了一条订阅流
+    await link.queue.put(event("delta.message_done", "chat", parent="external-user",
+                               message="r9", content="【播报】泵测试消息"))
+    await asyncio.sleep(1.2)
+    assert inbox == [("device-1", "muse", "泵测试消息")]
+    assert link.subscriptions == 1
+    await bridge.real.stop()
+
+
+async def test_pump_first_send_creates_missing_chat():
+    from musegadget.link_client import HttpStreamError
+
+    class NewChatLink(PumpLink):
+        def __init__(self):
+            super().__init__([
+                event("delta.message_done", "chat", parent="u1", content="你好"),
+                event("task.status", "chat", message="task", status="completed"),
+            ])
+            self.created = False
+
+        async def subscribe_chat(self, chat):
+            if not self.created:
+                raise HttpStreamError(404, "/chat/subscribe")
+            async for value in super().subscribe_chat(chat):
+                yield value
+
+        async def send_chat(self, text, chat, output_modality):
+            self.created = True
+            return await super().send_chat(text, chat, output_modality)
+
+    link = NewChatLink()
+    bridge = PumpBridge(link)
+    session = MuseSession(bridge, "chat", voice_hint="")
+
+    async def collect_all():
+        return [ev async for ev in session.send("你好")]
+
+    events = await asyncio.wait_for(collect_all(), 10)
+    assert [e.text for e in events if e.__class__.__name__ == "TextDelta"] == ["你好\n"]
+    assert events[-1].__class__.__name__ == "Done"
+    await bridge.real.stop()
