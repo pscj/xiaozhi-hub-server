@@ -336,9 +336,18 @@ class MuseBridge:
                     logger.bind(tag="Muse").info("常驻监听：一条消息已被回合认领或处理过，跳过")
                     self._remember(self._consumed, session_id, message_id)
                     continue
-                text = (item["final"] or item["text"] or "").strip()
-                logger.bind(tag="Muse").info("常驻监听收到完整消息：{}", text[:40])
-                if not text.startswith(PROACTIVE_MARKER):
+                # 最终文本（display_text/transcript）与增量累积是两个来源：实测发现
+                # 定时消息的最终文本会丢开头的【播报】标记、增量里却完整（反之亦可能），
+                # 所以两个来源都查标记，用带标记的那个来源播报。
+                final_text = (item["final"] or "").strip()
+                delta_text = (item["text"] or "").strip()
+                logger.bind(tag="Muse").info("常驻监听收到完整消息：final=「{}」deltas=「{}」",
+                                               final_text[:40], delta_text[:40])
+                if final_text.startswith(PROACTIVE_MARKER):
+                    text = final_text
+                elif delta_text.startswith(PROACTIVE_MARKER):
+                    text = delta_text
+                else:
                     # 专属聊天里的普通消息（如 App 对话回复）：不念，记下避免重放再处理
                     self._remember(self._consumed, session_id, message_id)
                     continue

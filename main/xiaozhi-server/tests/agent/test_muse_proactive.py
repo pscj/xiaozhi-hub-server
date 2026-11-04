@@ -96,6 +96,19 @@ async def test_streamed_text_is_assembled_without_final_content(inbox):
     await bridge.stop()
 
 
+async def test_marker_found_in_deltas_when_final_text_lacks_it(inbox):
+    # 实测回归：定时消息的最终文本（content/display_text）丢了开头的播报标记，
+    # 增量里却完整——两个来源都查标记，带标记的来源优先。
+    link = WatchLink()
+    bridge = make_bridge(link)
+    bridge.ensure_watcher("chat", "device-1")
+    await link.queue.put(event("delta.text_append", "chat", text="【播报】叮，时间到了"))
+    await link.queue.put(event("delta.message_done", "chat", content="叮，时间到了"))
+    await asyncio.sleep(1.2)
+    assert inbox == [("device-1", "muse", "叮，时间到了")]
+    await bridge.stop()
+
+
 async def test_unmarked_proactive_message_is_not_reported(inbox):
     link = WatchLink()
     bridge = make_bridge(link)
