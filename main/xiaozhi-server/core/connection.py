@@ -97,6 +97,8 @@ class ConnectionHandler:
 
         self.need_bind = False  # 是否需要绑定设备
         self.bind_completed_event = asyncio.Event()
+        self.components_ready = asyncio.Event()
+        self._startup_greeting_task = None
         self.bind_code = None  # 绑定设备的验证码
         self.last_bind_prompt_time = 0  # 上次播放绑定提示的时间戳(秒)
         self.bind_prompt_interval = 60  # 绑定提示播放间隔(秒)
@@ -672,6 +674,7 @@ class ConnectionHandler:
             self._init_prompt_enhancement()
             """注入工具调用few-shot示例（仅function_call模式）"""
             self._inject_tool_call_fewshot()
+            return True
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
@@ -812,7 +815,11 @@ class ConnectionHandler:
             # 异步获取差异化配置
             await self._initialize_private_config_async()
             # 在线程池中初始化组件
-            self.executor.submit(self._initialize_components)
+            initialized = await asyncio.wrap_future(
+                self.executor.submit(self._initialize_components)
+            )
+            if initialized:
+                self.components_ready.set()
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"后台初始化失败: {e}")
 
@@ -1651,6 +1658,13 @@ class ConnectionHandler:
     async def close(self, ws=None):
         """资源清理方法"""
         try:
+            greeting_task = self._startup_greeting_task
+            if greeting_task and not greeting_task.done():
+                greeting_task.cancel()
+                try:
+                    await greeting_task
+                except asyncio.CancelledError:
+                    pass
             # [xiaozhi-hub] 从管理后台注销；通知这个连接用过的每个 LLM 连接关闭（claude_cli 结束对应的 Claude Code 进程）
             from core.admin import connections as hub_connections
             from core.agent import llm_router

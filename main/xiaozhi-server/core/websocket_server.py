@@ -31,6 +31,7 @@ _setup_websockets_logger()
 
 
 from core.connection import ConnectionHandler
+from core.agent.startup_greeting import StartupGreeting
 from config.config_loader import get_config_from_api_async
 from core.auth import AuthManager, AuthenticationError
 from core.utils import tts_phrase_cache
@@ -45,6 +46,7 @@ class WebSocketServer:
         self.config = config
         self.logger = setup_logging(config)
         self.config_lock = asyncio.Lock()
+        self.startup_greeting = StartupGreeting()
         modules = initialize_modules(
             self.logger,
             self.config,

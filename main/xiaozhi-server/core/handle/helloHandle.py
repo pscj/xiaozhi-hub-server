@@ -64,6 +64,12 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         welcome = {**welcome, "features": {**(welcome.get("features") or {}), "vad_end": True}}
     await conn.websocket.send(json.dumps(welcome))
 
+    # 客户端收到 hello 后才能接收播报；组件初始化结束后再说准备好了。
+    if getattr(conn, "server", None) and conn._startup_greeting_task is None:
+        conn._startup_greeting_task = asyncio.create_task(
+            conn.server.startup_greeting.notify(conn)
+        )
+
     # The device waits for the server hello before processing MCP messages.
     if features and features.get("mcp"):
         asyncio.create_task(send_mcp_initialize_message(conn))
