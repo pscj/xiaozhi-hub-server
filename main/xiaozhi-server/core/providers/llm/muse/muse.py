@@ -52,7 +52,7 @@ class LLMProvider(AgentProvider):
         if st.agent and st.agent.alive:
             return False
         record = self.store.get(st.key) or {}
-        agent = MuseSession(self.bridge, record.get("session_id"), self.voice_hint)
+        agent = MuseSession(self.bridge, record.get("session_id"), self.voice_hint, st.key)
         await agent.start()
         if st.closed:
             await agent.close()
