@@ -91,11 +91,11 @@ async def pause():
 
 class RuntimeSession:
     """Keep SDK objects on the runtime loop; provider loops only forward calls."""
-    def __init__(self, bridge, session_id=None, voice_hint=''):
+    def __init__(self, bridge, session_id=None, voice_hint='', device_key=''):
         self.runtime = _current
         if self.runtime is None:
             raise AgentSessionError(ErrorKind.SERVER, 'Muse 注册服务尚未启动')
-        self.session = MuseSession(self.runtime.bridge, session_id, voice_hint)
+        self.session = MuseSession(self.runtime.bridge, session_id, voice_hint, device_key)
 
     @property
     def alive(self):
