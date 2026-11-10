@@ -121,7 +121,8 @@ ALWAYS_ON_PLUGINS = [
     {"name": "get_lunar", "label": "查日期", "desc": "今天几号、星期几、农历和节气"},
 ]
 PLUGINS = [
-    {"name": "get_weather", "label": "查天气", "desc": "实时天气和预报（使用项目共用的天气 Key，用多了可能被限制）"},
+    {"name": "get_weather", "label": "查天气", "desc": "实时天气和预报，点击“设置”填写和风天气凭据和默认城市",
+     "config": "get_weather"},
     {"name": "get_news_from_newsnow", "label": "热点新闻", "desc": "澎湃新闻、百度热搜、财联社等热榜"},
     {"name": "get_news_from_chinanews", "label": "中新网新闻", "desc": "中国新闻网的社会、国际、财经新闻"},
     {"name": "play_music", "label": "放音乐", "desc": "播放电脑上 music 目录里的歌曲"},

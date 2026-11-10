@@ -427,7 +427,7 @@ $("auth-form").addEventListener("submit", async (ev) => {
 });
 $("logout").onclick = async () => { if (!confirmLeave()) return; page.dirty = null; await api("logout", {}); await route(); };
 
-const PAGES = { status: renderStatus, how: renderHow, llm: renderLLM, calls: renderCallNames, grokbot: renderGrokBot, muse: renderMuse, memory: renderMemory, asr: renderASR, tts: renderTTS, intent: renderIntent, update: renderUpdate };
+const PAGES = { status: renderStatus, how: renderHow, llm: renderLLM, calls: renderCallNames, grokbot: renderGrokBot, muse: renderMuse, memory: renderMemory, asr: renderASR, tts: renderTTS, intent: renderIntent, weather: renderWeather, update: renderUpdate };
 const page = { name: "", dirty: null, timer: null };
 function currentPage() { const p = location.hash.slice(1); return PAGES[p] ? p : "status"; }
 function confirmLeave() { return !(page.dirty && page.dirty()) || confirm("当前页面有修改还没保存，确定离开吗？"); }
@@ -438,7 +438,7 @@ async function openPage(name, force) {
   clearInterval(page.timer); page.timer = null; page.dirty = null; page.name = name;
   if (audio) { audio.pause(); audio = null; }
   if (location.hash.slice(1) !== name) history.replaceState(null, "", "#" + name);
-  document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.page === name));
+  document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.page === (name === "weather" ? "intent" : name)));
   const root = $("page");
   if (!force) root.innerHTML = '<p class="muted">加载中…</p>';
   try { await PAGES[name](root); }
@@ -1201,6 +1201,47 @@ async function renderTTS(root) {
   });
 }
 
+// ---------- 天气 ----------
+
+async function renderWeather(root) {
+  const d = await api("weather");
+  root.innerHTML = `
+    <div class="page-head"><div><button class="btn sm" id="weather-back">← 返回意图识别</button><h1>天气设置</h1><p class="sub">配置和风天气，用于查询实时天气和未来 7 天预报。</p></div>
+      <span class="pill ${d.configured ? "ok" : "warn"}">${d.configured ? "已填写配置" : "尚未配置"}</span></div>
+    <div class="card panel">
+      <p class="muted small">前往 <a href="https://console.qweather.com/" target="_blank" rel="noopener noreferrer">和风天气控制台 ↗</a>，在项目管理中创建 API KEY，在设置中查看同一账号的 API Host。</p>
+      <div class="grid2">
+        <label class="f">API Key<input class="in" id="weather-key" type="password" autocomplete="new-password"
+          placeholder="${d.key_set ? `已设置 ${esc(d.key_hint)}，留空保持不变` : "填写你的和风天气 API Key"}"></label>
+        <label class="f">API Host<input class="in" id="weather-host" value="${esc(d.api_host)}" spellcheck="false" autocomplete="off" placeholder="填写控制台中的专属域名">
+          <span class="hint">只填写域名，不带 https://、端口或路径。</span></label>
+        <label class="f full">默认城市<input class="in" id="weather-location" value="${esc(d.default_location)}" autocomplete="off" placeholder="填写默认查询城市">
+          <span class="hint">未指定城市且无法通过设备 IP 定位时使用。</span></label>
+      </div>
+      <p class="muted small">请填写你自己的凭据和城市。密钥保存后只显示掩码；测试连接会使用当前填写的内容，不会保存。</p>
+      <div class="actions"><span class="result" id="weather-result" role="status" aria-live="polite"></span>
+        <button class="btn" id="weather-test">测试连接</button><button class="btn primary" id="weather-save">保存</button></div>
+    </div>
+    <div class="banner info">查天气还需要在“意图识别”中选择“用插件”，并勾选“查天气”。保存天气设置后，设备重新连接即可使用新配置。</div>`;
+  const values = () => ({ api_key: $("weather-key").value.trim(), api_host: $("weather-host").value.trim(),
+    default_location: $("weather-location").value.trim() });
+  page.dirty = snapshot(values);
+  $("weather-back").onclick = () => openPage("intent");
+  const result = (message, ok) => {
+    $("weather-result").textContent = message;
+    $("weather-result").style.color = ok ? "var(--ok)" : "var(--err)";
+  };
+  $("weather-test").onclick = (e) => busy(e.target, async () => {
+    result("正在验证和风天气凭据和默认城市…", true);
+    try { const r = await api("weather/test", values()); result(r.note, true); }
+    catch (err) { result(err.message, false); }
+  });
+  $("weather-save").onclick = (e) => busy(e.target, async () => {
+    try { const r = await api("weather", values()); toast(r.note); page.dirty = null; await openPage("weather", true); }
+    catch (err) { result(err.message, false); }
+  });
+}
+
 // ---------- 意图识别 ----------
 
 async function renderIntent(root) {
@@ -1220,8 +1261,9 @@ async function renderIntent(root) {
     <div class="section-title">插件<span class="muted small" style="font-weight:400">选“用插件”时生效</span></div>
     <div class="card panel" id="plugins-box">
       <div class="plugins">
-        ${d.plugins.map((p) => `<label class="plugin ${p.enabled ? "on" : ""}"><input type="checkbox" data-fn="${esc(p.name)}" ${p.enabled ? "checked" : ""}>
-          <div><b>${esc(p.label)}</b>${p.needs_config ? ' <span class="pill warn">还没配置</span>' : ""}<small>${esc(p.desc)}</small></div></label>`).join("")}
+        ${d.plugins.map((p) => `<div class="plugin ${p.enabled ? "on" : ""}"><label style="display:flex;gap:10px;flex:1;min-width:0;cursor:pointer"><input type="checkbox" data-fn="${esc(p.name)}" ${p.enabled ? "checked" : ""}>
+          <div><b>${esc(p.label)}</b>${p.needs_config ? ' <span class="pill warn">还没配置</span>' : ""}<small>${esc(p.desc)}</small></div></label>
+          ${p.name === "get_weather" ? '<button class="btn sm" id="weather-settings">设置</button>' : ""}</div>`).join("")}
         ${d.always_on.map((p) => `<div class="plugin fixed"><input type="checkbox" checked disabled>
           <div><b>${esc(p.label)}</b> <span class="pill">始终开启</span><small>${esc(p.desc)}</small></div></div>`).join("")}
       </div>
@@ -1234,8 +1276,11 @@ async function renderIntent(root) {
       b.classList.toggle("on", b.dataset.mode === mode);
       b.classList.toggle("off", d.locked && b.dataset.mode !== "nointent");
     });
-    $("plugins-box").classList.toggle("disabled-area", mode !== "function_call");
-    root.querySelectorAll("[data-fn]").forEach((i) => i.closest(".plugin").classList.toggle("on", i.checked));
+    root.querySelectorAll("[data-fn]").forEach((i) => {
+      i.disabled = mode !== "function_call";
+      i.closest("label").classList.toggle("disabled-area", i.disabled);
+      i.closest(".plugin").classList.toggle("on", i.checked);
+    });
   };
   root.querySelectorAll("[data-mode]").forEach((b) => (b.onclick = () => {
     if (d.locked && b.dataset.mode !== "nointent") return toast("使用 Claude Code 时只能选“不用插件”", true);
@@ -1244,6 +1289,7 @@ async function renderIntent(root) {
   root.querySelectorAll("[data-fn]").forEach((i) => (i.onchange = sync));
   sync();
   page.dirty = snapshot(values);
+  $("weather-settings").onclick = () => openPage("weather");
   $("intent-save").onclick = (e) => busy(e.target, async () => {
     try { const r = await api("intent", values()); toast(r.note, r.failed); page.dirty = null; await openPage("intent", true); }
     catch (err) { toast(err.message, true); }

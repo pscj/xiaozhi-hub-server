@@ -18,7 +18,7 @@ GET_WEATHER_FUNCTION_DESC = {
         "description": (
             "获取某个地点的天气，用户应提供一个位置，比如用户说杭州天气，参数为：杭州。"
             "如果用户说的是省份，默认用省会城市。如果用户说的不是省份或城市而是一个地名，默认用该地所在省份的省会城市。"
-            "重要：本地未来7天天气已在上下文中提供，用户未指明其他城市时绝对不要调用此工具。"
+            "如果上下文中已有所需地点和日期的天气可直接使用，否则调用此工具查询。"
         ),
         "parameters": {
             "type": "object",
@@ -111,16 +111,31 @@ WEATHER_CODE_MAP = {
 }
 
 
+class WeatherServiceError(Exception):
+    """可直接展示给用户的天气服务错误，不包含请求凭据。"""
+
+
 async def fetch_city_info(location, api_key, api_host):
-    url = f"https://{api_host}/geo/v2/city/lookup?key={api_key}&location={location}&lang=zh"
-    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
-        response = await client.get(url, headers=HEADERS)
-    data = response.json()
-    if data.get("error") is not None:
-        logger.bind(tag=TAG).error(
-            f"获取天气失败，原因：{data.get('error', {}).get('detail')}"
-        )
-        return None
+    url = f"https://{api_host}/geo/v2/city/lookup"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
+            response = await client.get(url, headers={**HEADERS, "X-QW-Api-Key": api_key},
+                                        params={"location": location, "lang": "zh"})
+        if response.status_code == 401:
+            raise WeatherServiceError("和风天气认证失败，请检查天气设置中的 API Key 和 API Host 是否正确且属于同一账号")
+        if response.status_code == 403:
+            raise WeatherServiceError("和风天气拒绝访问，请检查 API Host、账号额度和凭据访问限制")
+        response.raise_for_status()
+        data = response.json()
+    except httpx.TimeoutException:
+        raise WeatherServiceError("连接和风天气超时，请稍后重试") from None
+    except httpx.HTTPError:
+        raise WeatherServiceError("请求和风天气失败，请检查 API Host 和网络连接") from None
+    except ValueError:
+        raise WeatherServiceError("和风天气返回了无法解析的数据，请检查 API Host") from None
+    code = str(data.get("code", "200"))
+    if data.get("error") is not None or code not in ("200", "404"):
+        raise WeatherServiceError("和风天气查询失败，请检查天气设置中的凭据、API Host 和账号状态")
     return data.get("location", [])[0] if data.get("location") else None
 
 
@@ -166,9 +181,11 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
     from core.utils.cache.manager import cache_manager, CacheType
 
     weather_config = conn.config.get("plugins", {}).get("get_weather", {})
-    api_host = weather_config.get("api_host", "mj7p3y7naa.re.qweatherapi.com")
-    api_key = weather_config.get("api_key", "a861d0d5e7bf4ee1a83d9a9e4f96d4da")
-    default_location = weather_config.get("default_location", "广州")
+    api_host = str(weather_config.get("api_host") or "").strip()
+    api_key = str(weather_config.get("api_key") or "").strip()
+    default_location = str(weather_config.get("default_location") or "").strip()
+    if not api_host or not api_key:
+        return ActionResponse(Action.REQLLM, "天气服务尚未配置，请先在管理后台的“意图识别 → 查天气 → 设置”中填写 API Key 和 API Host", None)
     client_ip = conn.client_ip
 
     # 优先使用用户提供的location参数
@@ -191,6 +208,8 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
         else:
             # 若无IP，使用默认位置
             location = default_location
+    if not location:
+        return ActionResponse(Action.REQLLM, "无法确定查询城市，请告诉我城市名称，或在管理后台的“意图识别 → 查天气 → 设置”中填写默认城市", None)
     # 尝试从缓存获取完整天气报告
     weather_cache_key = f"full_weather_{location}_{lang}"
     cached_weather_report = cache_manager.get(CacheType.WEATHER, weather_cache_key)
@@ -198,7 +217,11 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
         return ActionResponse(Action.REQLLM, cached_weather_report, None)
 
     # 缓存未命中，获取实时天气数据
-    city_info = await fetch_city_info(location, api_key, api_host)
+    try:
+        city_info = await fetch_city_info(location, api_key, api_host)
+    except WeatherServiceError as e:
+        logger.bind(tag=TAG).error(str(e))
+        return ActionResponse(Action.REQLLM, str(e), None)
     if not city_info:
         return ActionResponse(
             Action.REQLLM, f"未找到相关的城市: {location}，请确认地点是否正确", None

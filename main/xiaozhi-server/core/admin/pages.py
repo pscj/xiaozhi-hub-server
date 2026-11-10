@@ -732,10 +732,57 @@ def save_tts_voice(voice: str, merged: dict, path: Path = None) -> list:
     return config_store.update_entry("TTS", name, {"voice": voice}, merged, path)
 
 
+# ---------- 天气 ----------
+
+def describe_weather(merged: dict) -> dict:
+    entry = (merged.get("plugins") or {}).get("get_weather") or {}
+    key = _text(entry.get("api_key"))
+    host = _text(entry.get("api_host"))
+    location = _text(entry.get("default_location"))
+    return {"api_host": host, "default_location": location,
+            "key_set": bool(key), "key_hint": config_store.mask_key(key),
+            "configured": bool(key and host and location)}
+
+
+def weather_test_config(payload: dict, merged: dict) -> dict:
+    entry = (merged.get("plugins") or {}).get("get_weather") or {}
+    values = {}
+    for field, label in (("api_key", "API Key"), ("api_host", "API Host"),
+                         ("default_location", "默认城市")):
+        raw = payload.get(field, entry.get(field))
+        if raw is not None and not isinstance(raw, str):
+            raise ValueError(f"{label} 必须是文本")
+        value = (raw or "").strip()
+        if field == "api_key" and not value:
+            value = _text(entry.get(field))  # 密钥留空时沿用已保存的值
+        if not value or config_store.is_placeholder(value):
+            raise ValueError(f"请填写{label}")
+        values[field] = value
+    if any(c.isspace() for c in values["api_key"]):
+        raise ValueError("API Key 不能包含空格或换行")
+    if not re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}",
+                        values["api_host"]):
+        raise ValueError("API Host 只填写域名，不要包含 https://、端口或路径")
+    return values
+
+
+def save_weather(payload: dict, merged: dict, path: Path = None) -> list:
+    values = weather_test_config(payload, merged)
+    entry = (merged.get("plugins") or {}).get("get_weather") or {}
+    changes = {k: v for k, v in values.items() if v != entry.get(k)}
+    if changes:
+        with config_store.edit_custom(path) as data:
+            target = data.setdefault("plugins", CommentedMap()).setdefault("get_weather", CommentedMap())
+            target.update(changes)
+    return list(changes)
+
+
 # ---------- 意图识别 ----------
 
 def plugin_configured(merged: dict, config_key: str) -> bool:
     """插件需要的 Key 是否已填写（上游默认值是"你的…"或"mk-xxx"这类占位文本）。"""
+    if config_key == "get_weather":
+        return describe_weather(merged)["configured"]
     key = ((merged.get("plugins") or {}).get(config_key) or {}).get("api_key")
     return not config_store.is_placeholder(key) and not str(key).strip().lower().endswith("-xxx")
 

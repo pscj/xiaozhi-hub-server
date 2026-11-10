@@ -113,6 +113,9 @@ class AdminHandler:
                 web.get("/admin/api/tts/preview", self.handle_tts_preview),
                 web.get("/admin/api/intent", self.handle_intent),
                 web.post("/admin/api/intent", self.handle_intent_save),
+                web.get("/admin/api/weather", self.handle_weather),
+                web.post("/admin/api/weather", self.handle_weather_save),
+                web.post("/admin/api/weather/test", self.handle_weather_test),
                 web.get("/admin/api/call-names", self.handle_call_names),
                 web.post("/admin/api/call-names", self.handle_call_names_save),
                 web.post("/admin/api/call-names/learn", self.handle_call_names_learn),
@@ -1100,6 +1103,48 @@ class AdminHandler:
             self._voice_samples[voice] = audio
         return web.Response(body=audio, content_type="audio/mpeg",
                             headers={**SECURITY_HEADERS, "Cache-Control": "private, max-age=86400"})
+
+    # ---------- 天气 ----------
+
+    async def handle_weather(self, request: web.Request):
+        self._require_login(request)
+        merged = await self._blocking(self._merged)
+        return self._json({"ok": True, **pages.describe_weather(merged)})
+
+    async def handle_weather_save(self, request: web.Request):
+        self._require_login(request)
+        body = await self._read_json(request)
+        try:
+            merged = await self._blocking(self._merged)
+            changed = await self._blocking(pages.save_weather, body, merged, self.config_path)
+        except ValueError as e:
+            return self._error(str(e), 400)
+        if changed:
+            merged = await self._blocking(self._merged)
+            self.config.setdefault("plugins", {})["get_weather"] = copy.deepcopy(merged["plugins"]["get_weather"])
+            # 设备连接持有配置副本，重连后读取新值；清掉旧天气，避免继续使用旧结果。
+            from core.utils.cache.manager import cache_manager, CacheType
+            cache_manager.clear(CacheType.WEATHER)
+        self.logger.bind(tag=TAG).info(f"管理后台更新了天气设置: {', '.join(changed) or '无变化'}")
+        return self._json({"ok": True, "changed": changed,
+                           "note": "已保存，设备重新连接后生效" if changed else "没有修改"})
+
+    async def handle_weather_test(self, request: web.Request):
+        self._require_login(request)
+        body = await self._read_json(request)
+        try:
+            merged = await self._blocking(self._merged)
+            values = pages.weather_test_config(body, merged)
+        except ValueError as e:
+            return self._error(str(e), 400)
+        from plugins_func.functions.get_weather import fetch_city_info, WeatherServiceError
+        try:
+            city = await fetch_city_info(values["default_location"], values["api_key"], values["api_host"])
+        except WeatherServiceError as e:
+            return self._error(str(e), 400)
+        if not city:
+            return self._error("认证请求已完成，但未找到默认城市，请检查城市名称", 400)
+        return self._json({"ok": True, "note": f"认证成功，找到城市：{city.get('name') or values['default_location']}"})
 
     # ---------- 意图识别 ----------
 
