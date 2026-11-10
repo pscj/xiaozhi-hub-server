@@ -30,7 +30,7 @@ sh deploy/router/build.sh
 目录已存在时不要重复 clone。Python、系统依赖、CLI 和模型均装在镜像内，宿主机不需要 Python 或 Compose。
 完整构建可能耗时较长，也可能超出路由器可用内存；这时可在另一台 ARM64 Linux 机器构建后，用 `docker save` / `docker load` 导入相同镜像，功能不变。
 
-默认先从 Hugging Face 下载本地 X-ASR，重试失败或文件不完整时自动改用 `hf-mirror.com`。切换下载源会清理当前文件的未完成下载，避免混用两个来源的数据。显式指定其他 `HF_ENDPOINT` 时只使用指定源。
+默认先从 Hugging Face 下载本地 X-ASR，每个源只尝试一次，下载失败或文件不完整时直接改用 `hf-mirror.com`。切换下载源会清理当前文件的未完成下载，避免混用两个来源的数据。显式指定其他 `HF_ENDPOINT` 时只使用指定源。
 
 遇到模型下载 HTTP 503（下载服务暂时不可用）或下载较慢时，可直接指定镜像站重新构建：
 
@@ -102,7 +102,39 @@ docker exec -it -u xiaozhi -e HOME=/home/xiaozhi xiaozhi-hub claude
 
 按 CLI 提示登录，然后在管理后台选择 ClaudeCLI。需要给 Agent 使用的项目，可放在持久化的 `deploy/router/home/xiaozhi-workspace`；其他宿主机目录需要自行增加 Docker 挂载。
 
-## 4. 从之前的精简容器更新
+## 4. 更新代码和镜像
+
+### 日常修改 core 代码
+
+`start.sh` 和 Compose 默认把仓库里的 `main/xiaozhi-server/core` 以只读方式挂载到容器。Python、系统库和模型继续使用镜像内的环境，宿主机只需要 Docker 和源码。
+
+把改动同步到部署机器上的同一份仓库后，重启即可加载：
+
+```sh
+docker restart xiaozhi-hub
+docker logs --tail 80 xiaozhi-hub
+```
+
+只有 `core` 目录使用源码挂载；修改其他目录或新增依赖、更新 Python / 系统库时，仍需重新构建镜像并重建容器。
+
+### 现有容器首次启用源码挂载
+
+先把最新源码和启动脚本同步到部署机器，并备份原数据。已有容器需要重建一次才能增加挂载，不需要为本次 kiosk 接口修改重新构建镜像：
+
+```sh
+docker stop xiaozhi-hub
+docker rm xiaozhi-hub
+cd /mnt/data/xiaozhi-hub-server/deploy/router
+sh start.sh 192.168.1.1
+```
+
+路径和 IP 按实际部署替换，沿用原数据目录和启动参数。使用 Compose 部署时，改为在 `deploy/router` 下执行：
+
+```sh
+LAN_IP=192.168.1.1 docker compose up -d --force-recreate hub
+```
+
+### 更新依赖或镜像
 
 先备份现有 `deploy/router/data`、`tmp` 和原镜像，再更新源码并构建成功，最后才替换旧容器：
 
@@ -137,7 +169,7 @@ docker restart xiaozhi-hub
 Healthcheck 只表示后台 HTTP 服务正常，不代表所有模型、API、音频设备和外部服务都已验证。
 完整模型组合需要在目标设备验证延迟和内存。路由器透明代理也需要检查容器的实际联网情况。
 
-Docker 部署通过更新源码、重建镜像和重建容器升级，不在运行中的镜像内执行原生系统服务安装或一键源码更新脚本。原生安装的开机自启由 Docker restart policy 替代。
+Docker 部署修改已挂载的 core 代码后重启即可；更新依赖或其他镜像内文件时重建镜像和容器。不在运行中的容器内执行原生系统服务安装或一键源码更新脚本。原生安装的开机自启由 Docker restart policy 替代。
 不挂载宿主机 Docker socket，也不启用 privileged。宿主机设备、USB 等访问如有需要，应像其他 Docker 服务一样按实际模块配置。
 
 ## 6. 依赖与验证

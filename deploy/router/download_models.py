@@ -18,14 +18,10 @@ MIRROR_ENDPOINT = 'https://hf-mirror.com'
 
 def download_file(endpoint, filename, partial):
     url = f'{endpoint}/csukuangfj2/{NAME}/resolve/main/{filename}'
-    command = ['curl', '-fL', '--retry', '5', '--retry-max-time', '300',
+    command = ['curl', '-fL',
                '--connect-timeout', '30', '--speed-limit', '1024', '--speed-time', '60']
     print(f'Downloading {filename} from {endpoint}', flush=True)
     result = subprocess.run(command + ['-C', '-', '-o', str(partial), url])
-    # Some endpoints do not support Range requests. Retry with a fresh file.
-    if result.returncode == 33:
-        partial.unlink(missing_ok=True)
-        result = subprocess.run(command + ['-o', str(partial), url])
     result.check_returncode()
 
 

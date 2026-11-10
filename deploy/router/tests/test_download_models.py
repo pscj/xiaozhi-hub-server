@@ -22,7 +22,8 @@ def target(tmp_path, monkeypatch):
     return folder / 'model.onnx'
 
 
-def test_http_failure_falls_back_with_fresh_file(target, monkeypatch):
+@pytest.mark.parametrize('returncode', [22, 33])
+def test_failure_falls_back_with_fresh_file(target, monkeypatch, returncode):
     partial = target.with_suffix('.onnx.part')
     calls = []
 
@@ -30,38 +31,18 @@ def test_http_failure_falls_back_with_fresh_file(target, monkeypatch):
         calls.append(args)
         if len(calls) == 1:
             partial.write_bytes(b'old')
-            return subprocess.CompletedProcess(args, 22)
+            return subprocess.CompletedProcess(args, returncode)
         assert not partial.exists()
         partial.write_bytes(b'valid')
         return subprocess.CompletedProcess(args, 0)
 
     monkeypatch.setattr(downloader.subprocess, 'run', run)
     downloader.main()
+    assert len(calls) == 2
     assert calls[0][-1].startswith(downloader.DEFAULT_ENDPOINT + '/')
     assert calls[1][-1].startswith(downloader.MIRROR_ENDPOINT + '/')
     assert target.read_bytes() == b'valid'
     assert not partial.exists()
-
-
-def test_range_failure_restarts_same_source(target, monkeypatch):
-    partial = target.with_suffix('.onnx.part')
-    partial.write_bytes(b'old')
-    calls = []
-
-    def run(args):
-        calls.append(args)
-        if len(calls) == 1:
-            assert '-C' in args
-            return subprocess.CompletedProcess(args, 33)
-        assert '-C' not in args
-        assert not partial.exists()
-        partial.write_bytes(b'valid')
-        return subprocess.CompletedProcess(args, 0)
-
-    monkeypatch.setattr(downloader.subprocess, 'run', run)
-    downloader.main()
-    assert calls[0][-1] == calls[1][-1]
-    assert target.read_bytes() == b'valid'
 
 
 @pytest.mark.parametrize('endpoint,attempts', [('', 2), ('https://private.example/', 1)])

@@ -2,13 +2,18 @@
 set -eu
 cd "$(dirname "$0")"
 TASK_DIR="$(pwd -P)"
+CORE_DIR="$TASK_DIR/../../main/xiaozhi-server/core"
+if [ ! -f "$CORE_DIR/admin/admin_handler.py" ]; then
+  echo "找不到服务端源码：$CORE_DIR；请保留完整仓库目录。" >&2
+  exit 1
+fi
 LAN_IP="${1:-$(uci -q get network.lan.ipaddr || true)}"
 LAN_IP="${LAN_IP%%/*}"
 case "$LAN_IP" in
   ''|*[!0-9.]*|0.0.0.0|127.*) echo '请指定路由器 LAN IPv4：sh start.sh 192.168.1.1' >&2; exit 1 ;;
 esac
 if docker inspect xiaozhi-hub >/dev/null 2>&1; then
-  echo 'xiaozhi-hub 已存在；更新镜像后请按 README 备份并重建容器。' >&2
+  echo 'xiaozhi-hub 已存在；仅更新 core 代码请重启容器，首次启用挂载或更新镜像请按 README 重建容器。' >&2
   exit 1
 fi
 mkdir -p data tmp home
@@ -29,6 +34,7 @@ docker run -d \
   -e "HUB_DEFAULT_LLM=${HUB_DEFAULT_LLM:-ClaudeAPI}" \
   -p "$LAN_IP:16688:16688" \
   -p "$LAN_IP:16689:16689" \
+  -v "$CORE_DIR:/opt/xiaozhi-hub/main/xiaozhi-server/core:ro" \
   -v "$TASK_DIR/data:/opt/xiaozhi-hub/main/xiaozhi-server/data" \
   -v "$TASK_DIR/tmp:/opt/xiaozhi-hub/main/xiaozhi-server/tmp" \
   -v "$TASK_DIR/home:/home/xiaozhi" \
