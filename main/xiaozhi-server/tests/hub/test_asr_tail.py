@@ -33,7 +33,8 @@ class FakeWS:
 def make_conn(asr, features):
     conn = SimpleNamespace(client_listen_mode="auto", asr_audio=[], client_have_voice=False, client_voice_stop=False,
                            asr=asr, features=features, websocket=FakeWS(), session_id="s")
-    conn.reset_audio_states = lambda: (conn.asr_audio.clear(), setattr(conn, "asr_voice_end", 0))
+    conn.reset_audio_states = lambda: (conn.asr_audio.clear(), setattr(conn, "asr_voice_end", 0),
+                                       setattr(conn, "asr_echo_context", None))
     return conn
 
 
@@ -127,7 +128,7 @@ def test_voice_stop_recognises_only_the_rest(monkeypatch):
     monkeypatch.setattr(base, "startToChat", to_chat)
     monkeypatch.setattr(base, "correct_and_record", lambda conn, text: text)
     monkeypatch.setattr(base, "enqueue_asr_report", lambda *a: None)
-    monkeypatch.setattr(base.reply_echo, "during_reply", lambda conn: False)
+    monkeypatch.setattr(base.reply_echo, "during_reply", lambda conn, context=None: False)
 
     class Rest(FakeASR):
         rest = None
@@ -166,7 +167,7 @@ def _patch_chat(monkeypatch, said):
     monkeypatch.setattr(base, "startToChat", to_chat)
     monkeypatch.setattr(base, "correct_and_record", lambda conn, text: text)
     monkeypatch.setattr(base, "enqueue_asr_report", lambda *a: None)
-    monkeypatch.setattr(base.reply_echo, "during_reply", lambda conn: False)
+    monkeypatch.setattr(base.reply_echo, "during_reply", lambda conn, context=None: False)
 
 
 class Says(FakeASR):
@@ -220,6 +221,60 @@ def test_empty_text_tells_the_client(monkeypatch):
         asyncio.run(conn.asr.handle_voice_stop(conn, [b"\0" * 64000]))
         assert [m["state"] for m in conn.websocket.sent] == sent, text
     assert said == ["你好"]
+
+
+def test_long_question_cleans_echo_before_user_record_and_chat(monkeypatch):
+    import core.providers.asr.base as base
+    from core.utils import reply_echo
+
+    said, recorded = [], []
+    now = [100.0]
+    monkeypatch.setattr(reply_echo.time, "monotonic", lambda: now[0])
+
+    async def to_chat(conn, text, gen=None):
+        said.append(text)
+
+    def record(conn, text):
+        recorded.append(text)
+        return text
+
+    monkeypatch.setattr(base, "startToChat", to_chat)
+    monkeypatch.setattr(base, "correct_and_record", record)
+    monkeypatch.setattr(base, "enqueue_asr_report", lambda *a: None)
+    for result in ("我认真听着呢， 请讲， 刚才资料查得怎么样了？",
+                   {"content": "我认真听着呢， 请讲， 刚才资料查得怎么样了？", "language": "zh"},
+                   "我认真听着呢，请讲。"):
+        conn = make_conn(Says(result), {"vad_end": True})
+        conn.voiceprint_provider = None
+        conn.sentence_id = "greeting"
+        conn.client_is_speaking = False
+        reply_echo.note_reply(conn, "我认真听着呢，请讲。")
+
+        async def run():
+            conn.client_have_voice = True
+            await conn.asr.receive_audio(conn, FRAME, True)
+            now[0] += 10  # 长句/识别完成时，原四秒窗口已过
+            await conn.asr.handle_voice_stop(conn, [FRAME * 300])
+        asyncio.run(run())
+        conn.reset_audio_states()
+        assert conn.asr_echo_context is None
+    assert said[0] == "刚才资料查得怎么样了？"
+    assert json.loads(said[1]) == {"content": "刚才资料查得怎么样了？", "language": "zh"}
+    assert len(said) == 2  # 纯回声不能进入聊天入口
+    assert recorded[0] == "刚才资料查得怎么样了？"
+    assert recorded[1] == {"content": "刚才资料查得怎么样了？", "language": "zh"}
+
+
+def test_connection_reset_clears_the_utterance_echo_context():
+    from unittest.mock import MagicMock
+    from core.connection import ConnectionHandler
+
+    conn = SimpleNamespace(client_audio_buffer=bytearray(b"audio"), client_voice_window=[],
+                           asr_audio=[FRAME], asr_echo_context={"text": "旧回复", "active": True},
+                           asr_voice_end=1, logger=MagicMock())
+    ConnectionHandler.reset_audio_states(conn)
+    assert conn.asr_echo_context is None
+    assert conn.asr_voice_end == 0
 
 
 def test_hello_says_the_hub_sends_vad_events():

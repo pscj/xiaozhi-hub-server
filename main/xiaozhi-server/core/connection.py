@@ -1833,6 +1833,7 @@ class ConnectionHandler:
         # Clear ASR buffers
         self.asr_audio.clear()
         self.asr_voice_end = 0
+        self.asr_echo_context = None
         self.asr_segment_start = 0
         self.asr_segments = []
 

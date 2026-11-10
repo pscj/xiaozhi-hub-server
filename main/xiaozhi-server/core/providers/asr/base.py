@@ -100,6 +100,8 @@ class ASRProviderBase(ABC):
             conn.asr_audio.append(pcm_frame)
         else:
             # 自动/实时模式：使用VAD检测
+            if audio_have_voice and not getattr(conn, "asr_voice_end", 0):
+                conn.asr_echo_context = reply_echo.capture_context(conn)
             conn.asr_audio.append(pcm_frame)
             if audio_have_voice:
                 conn.asr_voice_end = len(conn.asr_audio)  # [xiaozhi-hub] 最后一帧有声音的位置
@@ -168,6 +170,7 @@ class ASRProviderBase(ABC):
             total_start_time = time.monotonic()
             # [xiaozhi-hub] 识别要 1～2 秒，期间设备可能打断了这一句（唤醒词、按钮）：识别完代次变了就丢掉
             gen = turn_gen.current(conn)
+            echo_context = getattr(conn, "asr_echo_context", None)
 
             # 数据已经是PCM直接使用
             pcm_data = asr_audio_task
@@ -218,7 +221,7 @@ class ASRProviderBase(ABC):
                     f"{len(asr_audio_task[0]) / 32000:.1f} 秒，用时 {time.monotonic() - total_start_time:.2f} 秒")
             # ASR 可能把设备问候的回声和用户追问合成一句，先保留独立的追问。
             heard = raw_text.get("content", "") if isinstance(raw_text, dict) else raw_text
-            cleaned = reply_echo.strip_reply_prefix(conn, heard)
+            cleaned = reply_echo.strip_reply_prefix(conn, heard, echo_context)
             if cleaned != heard:
                 logger.bind(tag=TAG).info(f"去掉回复回声前缀，保留用户语音: {cleaned}")
                 raw_text = {**raw_text, "content": cleaned} if isinstance(raw_text, dict) else cleaned
@@ -270,10 +273,10 @@ class ASRProviderBase(ABC):
             self.stop_ws_connection()
 
             # [xiaozhi-hub] 回复期间识别出的是回复自己的回声（开着回声消除时麦克风不关）就丢掉
-            if text_len > 0 and reply_echo.during_reply(conn):
+            if text_len > 0 and reply_echo.during_reply(conn, echo_context):
                 logger.bind(tag=TAG).info(
                     f"回复期间识别: {content_for_length_check} | 峰值 {reply_echo.level_db(pcm_data):.1f} dBFS")
-                if reply_echo.is_echo(conn, content_for_length_check):
+                if reply_echo.is_echo(conn, content_for_length_check, echo_context):
                     logger.bind(tag=TAG).info(f"忽略回声识别: {content_for_length_check}")
                     text_len = 0
 

@@ -76,3 +76,36 @@ def test_prefix_trimming_requires_long_match_and_boundary():
     conn.reply_echo["at"] -= reply_echo.WINDOW_AFTER + 1
     heard = "我在这里等候您的指令， 今天的天气"
     assert reply_echo.strip_reply_prefix(conn, heard) == heard
+
+
+def test_screenshot_prefix_with_one_asr_substitution():
+    conn = make_conn()
+    reply_echo.note_reply(conn, "我一直都在呢，您请说。")
+    assert reply_echo.strip_reply_prefix(conn, "一直都在呢， 你请说你查到了什么") == "你查到了什么"
+    assert reply_echo.strip_reply_prefix(conn, "一直都在呢， 你请说") == "一直都在呢， 你请说"
+
+
+def test_context_survives_long_capture_and_recognition(monkeypatch):
+    conn = make_conn()
+    now = [100.0]
+    monkeypatch.setattr(reply_echo.time, "monotonic", lambda: now[0])
+    reply_echo.note_reply(conn, "我认真听着呢，请讲。")
+    conn.client_is_speaking = False
+    context = reply_echo.capture_context(conn)
+    now[0] += 10
+    heard = "我认真听着呢， 请讲， 刚才资料查得怎么样了？"
+    assert not reply_echo.during_reply(conn)
+    assert reply_echo.strip_reply_prefix(conn, heard, context) == "刚才资料查得怎么样了？"
+    assert reply_echo.is_echo(conn, "我认真听着呢，请讲。", context)
+    # 后来的回复不能改变已经开始识别的上一句上下文。
+    conn.sentence_id = "next"
+    reply_echo.note_reply(conn, "这是下一轮回复。")
+    assert reply_echo.strip_reply_prefix(conn, heard, context) == "刚才资料查得怎么样了？"
+
+
+def test_inactive_capture_does_not_gain_an_echo_window_later():
+    conn = make_conn()
+    context = reply_echo.capture_context(conn)
+    reply_echo.note_reply(conn, "我认真听着呢，请讲。")
+    heard = "我认真听着呢，请讲，刚才资料查得怎么样了？"
+    assert reply_echo.strip_reply_prefix(conn, heard, context) == heard

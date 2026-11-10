@@ -39,42 +39,56 @@ def note_reply(conn, text) -> None:
     st["at"] = time.monotonic()
 
 
-def during_reply(conn) -> bool:
+def during_reply(conn, context=None) -> bool:
+    if context is not None:
+        return bool(context["active"] and context["text"])
     st = _state(conn)
     return bool(st["text"]) and (conn.client_is_speaking or time.monotonic() - st["at"] <= WINDOW_AFTER)
 
 
-def is_echo(conn, text) -> bool:
+def capture_context(conn) -> dict:
+    """把首个有声帧时的回声上下文绑定到本句，避免收音/识别耗时使其过期。"""
+    return {"text": _state(conn)["text"], "active": during_reply(conn)}
+
+
+def is_echo(conn, text, context=None) -> bool:
     """回复期间识别出的这句话是不是回复自己的回声。"""
-    if not during_reply(conn):
+    if not during_reply(conn, context):
         return False
     heard = _NON_WORD.sub("", str(text))
     if not heard:
         return False
-    blocks = SequenceMatcher(None, heard, _state(conn)["text"], autojunk=False).get_matching_blocks()
+    reply = context["text"] if context is not None else _state(conn)["text"]
+    blocks = SequenceMatcher(None, heard, reply, autojunk=False).get_matching_blocks()
     return sum(b.size for b in blocks) / len(heard) >= MIN_SHARE
 
 
-def strip_reply_prefix(conn, text):
+def strip_reply_prefix(conn, text, context=None):
     """ASR 把回复回声和追问拼成一句时，只去掉可明确匹配的回声前缀。
 
-    至少匹配六个连续字，且前缀后有标点或空格、余下至少两个字。
+    精确前缀至少六个字且有标点/空格分界；完整回复尾部至少七个字时
+    兼容一次同长度 ASR 替换。余下至少两个字，且不能仍是回复回声。
     纯回声仍交给 is_echo，避免把回复尾部拆成新的用户问题。
     """
-    if not isinstance(text, str) or not during_reply(conn):
+    if not isinstance(text, str) or not during_reply(conn, context):
         return text
     positions = [i for i, char in enumerate(text) if not _NON_WORD.fullmatch(char)]
     heard = "".join(text[i] for i in positions)
-    reply = _state(conn)["text"]
+    reply = context["text"] if context is not None else _state(conn)["text"]
     for size in range(min(len(heard) - 2, len(reply)), 5, -1):
-        if heard[:size] not in reply:
+        exact = heard[:size] in reply
+        # ASR 可把“您”识别成“你”：仅允许完整回复尾部的一处同长度替换。
+        # 不以宽泛的字数占比截断用户原话。
+        one_substitution = (size >= 7 and size <= len(reply)
+                            and sum(a != b for a, b in zip(heard[:size], reply[-size:])) == 1)
+        if not exact and not one_substitution:
             continue
         # Require an ASR sentence/word boundary, not just shared characters.
         end = positions[size - 1] + 1
-        if positions[size] == end:
+        if positions[size] == end and not one_substitution:
             continue
         remainder = text[positions[size]:].strip()
-        if not is_echo(conn, remainder):
+        if not is_echo(conn, remainder, context):
             return remainder
     return text
 
