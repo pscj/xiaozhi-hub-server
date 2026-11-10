@@ -137,13 +137,14 @@ def mock_http(monkeypatch, status, data=None, error=None):
     return calls
 
 
-async def test_city_lookup_encodes_parameters_and_keeps_key_out_of_url(monkeypatch):
+async def test_city_lookup_uses_api_key_query_without_auth_header(monkeypatch):
     calls = mock_http(monkeypatch, 200, {"code": "200", "location": [{"name": "杭州"}]})
     assert await weather.fetch_city_info("杭州", VALUES["api_key"], VALUES["api_host"]) == {"name": "杭州"}
     url, request = calls[0]
     assert "?" not in url and VALUES["api_key"] not in url
-    assert request["headers"]["X-QW-Api-Key"] == VALUES["api_key"]
-    assert request["params"]["location"] == "杭州"
+    assert "X-QW-Api-Key" not in request["headers"]
+    assert "Authorization" not in request["headers"]
+    assert request["params"] == {"key": VALUES["api_key"], "location": "杭州", "lang": "zh"}
 
 
 @pytest.mark.parametrize("status, message", [(401, "认证失败"), (403, "拒绝访问"), (500, "请求和风天气失败")])

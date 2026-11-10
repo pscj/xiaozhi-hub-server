@@ -119,8 +119,8 @@ async def fetch_city_info(location, api_key, api_host):
     url = f"https://{api_host}/geo/v2/city/lookup"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
-            response = await client.get(url, headers={**HEADERS, "X-QW-Api-Key": api_key},
-                                        params={"location": location, "lang": "zh"})
+            response = await client.get(url, headers=HEADERS,
+                                        params={"key": api_key, "location": location, "lang": "zh"})
         if response.status_code == 401:
             raise WeatherServiceError("和风天气认证失败，请检查天气设置中的 API Key 和 API Host 是否正确且属于同一账号")
         if response.status_code == 403:
