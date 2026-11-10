@@ -44,3 +44,35 @@ def test_level_db():
     quiet = struct.pack("<960h", *([0] * 960))
     assert round(reply_echo.level_db([quiet, loud])) == -6
     assert reply_echo.level_db([]) == -120.0
+
+
+def test_greeting_echo_prefix_keeps_weather_question():
+    for reply, heard in [
+        ("请问您需要什么帮助？", "请问您需要什么帮助？ 今天的天气"),
+        ("我在这里，等候您的指令。", "我在这里等候您的指令， 今天的天气"),
+    ]:
+        conn = make_conn()
+        reply_echo.note_reply(conn, reply)
+        assert reply_echo.is_echo(conn, heard)  # 旧路径会误丢整句
+        cleaned = reply_echo.strip_reply_prefix(conn, heard)
+        assert cleaned == "今天的天气"
+        assert not reply_echo.is_echo(conn, cleaned)
+
+
+def test_prefix_trimming_does_not_turn_pure_echo_into_a_question():
+    conn = make_conn()
+    reply_echo.note_reply(conn, "请问您需要什么帮助？今天的天气晴朗。")
+    for heard in ("请问您需要什么帮助？", "请问您需要什么帮助？今天的天气晴朗。",
+                  "请问您需要什么帮助？今天的天汽晴朗。", "今天天气怎么样？"):
+        assert reply_echo.strip_reply_prefix(conn, heard) == heard
+
+
+def test_prefix_trimming_requires_long_match_and_boundary():
+    conn = make_conn()
+    reply_echo.note_reply(conn, "我在这里，等候您的指令。")
+    for heard in ("我在这里，今天的天气", "我在这里等候您的指令是什么意思？"):
+        assert reply_echo.strip_reply_prefix(conn, heard) == heard
+    conn.client_is_speaking = False
+    conn.reply_echo["at"] -= reply_echo.WINDOW_AFTER + 1
+    heard = "我在这里等候您的指令， 今天的天气"
+    assert reply_echo.strip_reply_prefix(conn, heard) == heard

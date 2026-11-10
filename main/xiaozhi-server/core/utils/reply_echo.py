@@ -4,6 +4,7 @@
 残留的回声很轻，但语音识别有时仍会把它认成回复里的一小段（例如"也是。"），被当成用户插话，把回复打断。
 
 做法：回复播放期间和播完后几秒内，识别结果里大部分字都出现在这次回复里，就当回声丢掉。
+若识别把较长的回复前缀和独立的用户追问拼成一句，先去掉明确匹配的回声前缀，再检查余下的追问。
 只看字，不看声音大小：回声的音量和用户离设备远近、音量设置都有关，定不出一个可靠的门限。
 """
 
@@ -52,6 +53,30 @@ def is_echo(conn, text) -> bool:
         return False
     blocks = SequenceMatcher(None, heard, _state(conn)["text"], autojunk=False).get_matching_blocks()
     return sum(b.size for b in blocks) / len(heard) >= MIN_SHARE
+
+
+def strip_reply_prefix(conn, text):
+    """ASR 把回复回声和追问拼成一句时，只去掉可明确匹配的回声前缀。
+
+    至少匹配六个连续字，且前缀后有标点或空格、余下至少两个字。
+    纯回声仍交给 is_echo，避免把回复尾部拆成新的用户问题。
+    """
+    if not isinstance(text, str) or not during_reply(conn):
+        return text
+    positions = [i for i, char in enumerate(text) if not _NON_WORD.fullmatch(char)]
+    heard = "".join(text[i] for i in positions)
+    reply = _state(conn)["text"]
+    for size in range(min(len(heard) - 2, len(reply)), 5, -1):
+        if heard[:size] not in reply:
+            continue
+        # Require an ASR sentence/word boundary, not just shared characters.
+        end = positions[size - 1] + 1
+        if positions[size] == end:
+            continue
+        remainder = text[positions[size]:].strip()
+        if not is_echo(conn, remainder):
+            return remainder
+    return text
 
 
 def level_db(frames) -> float:

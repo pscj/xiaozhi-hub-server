@@ -22,7 +22,10 @@ async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
     # 当前片段是否有人说话
     have_voice = conn.vad.is_vad(conn, pcm_frame)
     # 如果设备刚刚被唤醒，短暂忽略VAD检测
-    if hasattr(conn, "just_woken_up") and conn.just_woken_up:
+    # Realtime clients keep recording during the greeting. Suppressing these frames
+    # would discard the user's first question; reply_echo filters residual playback.
+    if (getattr(conn, "just_woken_up", False)
+            and conn.client_listen_mode != "realtime"):
         have_voice = False
         # 设置一个短暂延迟后恢复VAD检测
         if not hasattr(conn, "vad_resume_task") or conn.vad_resume_task.done():

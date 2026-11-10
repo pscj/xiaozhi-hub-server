@@ -216,6 +216,12 @@ class ASRProviderBase(ABC):
                 logger.bind(tag=TAG).info(
                     f"边说边识别：{len(segments)} 段说话时已识别，说完只识别最后 "
                     f"{len(asr_audio_task[0]) / 32000:.1f} 秒，用时 {time.monotonic() - total_start_time:.2f} 秒")
+            # ASR 可能把设备问候的回声和用户追问合成一句，先保留独立的追问。
+            heard = raw_text.get("content", "") if isinstance(raw_text, dict) else raw_text
+            cleaned = reply_echo.strip_reply_prefix(conn, heard)
+            if cleaned != heard:
+                logger.bind(tag=TAG).info(f"去掉回复回声前缀，保留用户语音: {cleaned}")
+                raw_text = {**raw_text, "content": cleaned} if isinstance(raw_text, dict) else cleaned
             # [xiaozhi-hub] 识别后纠错替换（如 cloud code → Claude Code），并记一条最近识别记录供管理后台查看
             raw_text = correct_and_record(conn, raw_text)
 

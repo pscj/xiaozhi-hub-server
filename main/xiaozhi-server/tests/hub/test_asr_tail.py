@@ -180,6 +180,36 @@ class Says(FakeASR):
     stop_ws_connection = lambda self: None
 
 
+def test_greeting_echo_and_question_reach_chat_without_echo_prefix(monkeypatch):
+    import core.providers.asr.base as base
+    from core.utils import reply_echo
+
+    said, recorded = [], []
+
+    async def to_chat(conn, text, gen=None):
+        said.append(text)
+
+    def record(conn, text):
+        recorded.append(text)
+        return text
+
+    monkeypatch.setattr(base, "startToChat", to_chat)
+    monkeypatch.setattr(base, "correct_and_record", record)
+    monkeypatch.setattr(base, "enqueue_asr_report", lambda *a: None)
+    for result in ("请问您需要什么帮助？ 今天的天气",
+                   {"content": "请问您需要什么帮助？ 今天的天气", "language": "zh"}):
+        conn = make_conn(Says(result), {"vad_end": True})
+        conn.voiceprint_provider = None
+        conn.sentence_id = "greeting"
+        conn.client_is_speaking = False
+        reply_echo.note_reply(conn, "请问您需要什么帮助？")
+        asyncio.run(conn.asr.handle_voice_stop(conn, [b"\0" * 64000]))
+        assert not conn.websocket.sent  # 有效追问不能发 vad/empty
+    assert said[0] == "今天的天气"
+    assert json.loads(said[1]) == {"content": "今天的天气", "language": "zh"}
+    assert recorded == ["今天的天气", {"content": "今天的天气", "language": "zh"}]
+
+
 def test_empty_text_tells_the_client(monkeypatch):
     said = []
     _patch_chat(monkeypatch, said)
