@@ -135,6 +135,7 @@ class AdminHandler:
                 web.post("/kiosk/llm/use", self.handle_kiosk_llm_use),
                 web.post("/kiosk/reports", self.handle_kiosk_reports),
                 web.post("/kiosk/asr", self.handle_kiosk_asr),
+                web.get("/kiosk/weather", self.handle_kiosk_weather),
                 web.get("/kiosk/chat/history", self.handle_kiosk_chat_history),
                 web.post("/kiosk/chat/clear", self.handle_kiosk_chat_clear),
             ]
@@ -770,6 +771,18 @@ class AdminHandler:
         return name, result
 
     # ---------- 设备接口 ----------
+
+    async def handle_kiosk_weather(self, request: web.Request):
+        """只查天气、不进入对话；省略 location 时使用后台配置的默认城市。"""
+        from plugins_func.functions.get_weather import get_weather_data, WeatherServiceError
+
+        merged = await self._blocking(self._merged)
+        weather_config = (merged.get("plugins") or {}).get("get_weather") or {}
+        try:
+            weather = await get_weather_data(weather_config, request.query.get("location"))
+        except WeatherServiceError as e:
+            return self._json({"ok": False, "code": e.code, "error": str(e)}, status=e.status)
+        return self._json({"ok": True, "weather": weather})
 
     async def handle_kiosk_llm(self, request: web.Request):
         """可选的模型（装了 Claude Code 的话排第一个，然后是配好的 API 厂商、勾选的 Grok Bot）和当前选中的。

@@ -7,6 +7,7 @@ import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from bs4 import BeautifulSoup
 
 from core.admin import config_store, pages
 from core.admin.admin_handler import AdminHandler
@@ -16,6 +17,15 @@ from plugins_func.functions import get_weather as weather
 
 VALUES = {"api_key": "test-weather-key-12345678", "api_host": "test.re.qweatherapi.com",
           "default_location": "杭州"}
+FETCH_CITY_INFO = weather.fetch_city_info
+FETCH_WEATHER_PAGE = weather.fetch_weather_page
+
+
+@pytest.fixture(autouse=True)
+def isolated_weather_cache():
+    cache_manager.clear(CacheType.WEATHER)
+    yield
+    cache_manager.clear(CacheType.WEATHER)
 
 
 @pytest.fixture
@@ -175,3 +185,141 @@ async def test_weather_without_credentials_or_location_does_not_make_requests(mo
     conn.config = {"plugins": {"get_weather": {**VALUES, "default_location": ""}}}
     result = await weather.get_weather(conn)
     assert "请告诉我城市名称" in result.result
+
+
+@pytest.fixture
+def weather_source(monkeypatch):
+    calls = []
+
+    async def city(location, key, host):
+        calls.append((location, key, host))
+        return {"name": location, "id": "101210101", "fxLink": "https://www.qweather.com/weather/test.html"}
+
+    async def page(url):
+        rows = "".join(f'''<div class="city-forecast-tabs__row">
+            <div class="date-bg"><span class="date">11月{12 + day}日</span><img class="icon" src="/icons/100.svg"></div>
+            <div class="tmp-cont"><span class="temp">20°</span><span class="temp">10°</span></div>
+            </div>''' for day in range(8))
+        return BeautifulSoup('''<h1 class="c-submenu__location">杭州</h1>
+            <div class="c-city-weather-current"><div class="current-abstract">15° 晴</div>
+            <div class="current-basic"><div class="current-basic___item">60% 湿度</div></div></div>'''
+                             + rows, "html.parser")
+
+    monkeypatch.setattr(weather, "fetch_city_info", city)
+    monkeypatch.setattr(weather, "fetch_weather_page", page)
+    return calls
+
+
+def configure_weather(cfg_path):
+    pages.save_weather(VALUES, merged(cfg_path), cfg_path)
+
+
+async def test_client_weather_shares_structured_data_and_cache_with_voice(cfg_path, weather_source):
+    configure_weather(cfg_path)
+    app = web.Application()
+    AdminHandler({}, config_path=cfg_path).register(app)
+    async with TestClient(TestServer(app)) as client:
+        # 不登录管理后台、不建立语音连接，直接读取配置的默认城市。
+        response = await client.get("/kiosk/weather")
+        assert response.status == 200
+        body = await response.json()
+        data = body["weather"]
+        assert body["ok"] and data["cached"] is False
+        assert data["location"] == {"id": "101210101", "name": "杭州"}
+        assert data["current"] == {"summary": "15° 晴", "details": {"湿度": "60%"}}
+        assert len(data["forecast"]) == 7
+        assert data["forecast"][0] == {"date": "11月12日", "text": "晴", "temp_max": "20°", "temp_min": "10°"}
+        assert data["fetched_at"] > 0 and "未来7天预报" in data["report"]
+        assert data["source"] == "和风天气"
+        assert VALUES["api_key"] not in json.dumps(body) and VALUES["api_host"] not in json.dumps(body)
+        assert response.headers["Cache-Control"] == "no-store"
+        response = await client.get("/kiosk/weather", params={"location": " 杭州 "})
+        cached = (await response.json())["weather"]
+        assert cached["cached"] and cached["fetched_at"] == data["fetched_at"]
+        conn = SimpleNamespace(config=merged(cfg_path), client_ip=None)
+        reply = await weather.get_weather(conn, "杭州")
+        assert reply.result == data["report"]
+        assert weather_source == [("杭州", VALUES["api_key"], VALUES["api_host"])]
+        response = await client.get("/kiosk/weather", params={"location": "北京"})
+        assert response.status == 200 and weather_source[-1][0] == "北京"
+
+
+@pytest.mark.parametrize("location", ["a" * 129, "杭州\n北京", "杭州\x00"])
+async def test_client_weather_invalid_location_rejected_before_request(cfg_path, weather_source, location):
+    configure_weather(cfg_path)
+    app = web.Application()
+    AdminHandler({}, config_path=cfg_path).register(app)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/kiosk/weather", params={"location": location})
+        assert response.status == 400 and (await response.json())["code"] == "invalid_location"
+        assert weather_source == []
+
+
+async def test_client_weather_missing_configuration_and_default_city(cfg_path, weather_source):
+    app = web.Application()
+    AdminHandler({}, config_path=cfg_path).register(app)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/kiosk/weather", params={"location": "杭州"})
+        assert response.status == 503 and (await response.json())["code"] == "weather_not_configured"
+        configure_weather(cfg_path)
+        with config_store.edit_custom(cfg_path) as custom:
+            custom["plugins"]["get_weather"]["default_location"] = ""
+        response = await client.get("/kiosk/weather")
+        assert response.status == 400 and (await response.json())["code"] == "location_required"
+        assert weather_source == []
+        # 显式城市不要求存在默认城市，配置从磁盘读取，无需设备重连。
+        response = await client.get("/kiosk/weather", params={"location": "杭州"})
+        assert response.status == 200
+
+
+@pytest.mark.parametrize("kind, status, code", [
+    ("not_found", 404, "location_not_found"),
+    ("auth", 502, "weather_upstream_error"),
+    ("city_timeout", 504, "weather_timeout"),
+    ("page_timeout", 504, "weather_timeout"),
+    ("page_http", 502, "weather_upstream_error"),
+    ("page_changed", 502, "weather_upstream_error"),
+    ("city_shape", 502, "weather_upstream_error"),
+])
+async def test_client_weather_failures_are_json_and_not_cached(cfg_path, weather_source, monkeypatch, kind, status, code):
+    configure_weather(cfg_path)
+    calls = []
+    http_calls = []
+    real_city = weather.fetch_city_info
+
+    async def city(location, key, host):
+        calls.append(location)
+        if kind == "not_found":
+            return None
+        if kind == "city_shape":
+            return {"name": "杭州"}
+        return await real_city(location, key, host)
+
+    monkeypatch.setattr(weather, "fetch_city_info", city)
+    if kind in ("auth", "city_timeout", "page_timeout", "page_http"):
+        # 保留真实错误处理，只用 HTTP 桩替换网络请求。
+        if kind in ("auth", "city_timeout"):
+            monkeypatch.setattr(weather, "fetch_city_info", FETCH_CITY_INFO)
+        else:
+            monkeypatch.setattr(weather, "fetch_weather_page", FETCH_WEATHER_PAGE)
+        error = httpx.ReadTimeout(VALUES["api_key"]) if "timeout" in kind else None
+        http_calls = mock_http(monkeypatch, 401 if kind == "auth" else 500, {}, error=error)
+    if kind == "page_changed":
+        async def broken_page(url):
+            return BeautifulSoup("<html><h1>页面已更改</h1></html>", "html.parser")
+        monkeypatch.setattr(weather, "fetch_weather_page", broken_page)
+    app = web.Application()
+    AdminHandler({}, config_path=cfg_path).register(app)
+    async with TestClient(TestServer(app)) as client:
+        for _ in range(2):
+            response = await client.get("/kiosk/weather")
+            body = await response.json()
+            assert response.status == status
+            assert body["ok"] is False and body["code"] == code
+            assert "weather" not in body and VALUES["api_key"] not in json.dumps(body)
+        # 失败后重新请求仍然查询源服务，不将错误当成天气缓存。
+        assert cache_manager.get(CacheType.WEATHER, "weather_data_杭州_zh_CN") is None
+        if kind in ("auth", "city_timeout", "page_timeout", "page_http"):
+            assert len(http_calls) == 2
+        else:
+            assert len(calls) == 2

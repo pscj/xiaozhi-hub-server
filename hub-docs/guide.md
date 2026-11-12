@@ -180,6 +180,52 @@ http://<电脑的局域网 IP>:16688/xiaozhi/ota/
 | `POST /kiosk/llm/use` | `{"kind": "cli", "device": "..."}`、`{"kind": "api", "vendor": "deepseek", "device": "..."}` 或 `{"kind": "grok", "entry": "GrokBot_<名字>", "device": "..."}`，必须带 device | 和喊称呼一样只切这台设备并记住：它在线的连接马上换到新模型（从新对话开始），意图识别跟着这台设备的模型走（Claude Code、Grok Bot 不用插件，API 模型照后台的选择）。不改后台默认模型和全局的意图识别，默认模型只在后台改。成功时还带上切换后的模型列表（同 `GET /kiosk/llm?device=...`），不用再查一次 |
 | `POST /kiosk/reports` | `{"device": "...", "quiet": false, "play": false}` | `count`：这台设备有几条待汇报；`playing`：是否已安排念。`quiet` 为 true 表示设备在睡眠时段，期间有待汇报也不主动念（每次查询都要带上）；`play` 为 true 表示用户点了要听，马上在设备的连接上念 |
 | `POST /kiosk/asr` | 10 秒以内的 16kHz 单声道 16 位 PCM（原始字节，不是 JSON） | `{"text", "ms"}`：只识别、不进对话，用服务已加载的本机识别模型（设备客户端可以用它复核唤醒词）。当前识别不是本机模型（如豆包）时返回 501 |
+| `GET /kiosk/weather` | 可选 `?location=北京`，省略或留空时使用后台配置的默认城市 | `{"ok": true, "weather": {...}}`：当前天气、最多 7 天预报、文字报告、来源和获取时间；与语音查询共用天气数据和缓存，无需调用大模型或建立 WebSocket 连接 |
+
+#### 客户端查询天气
+
+先在“意图识别 → 查天气 → 设置”填写和风天气 API Key、API Host 和默认城市。客户端直接查询天气不受“用插件”开关或当前模型限制；Key 仅由网关读取，客户端不用传入。接口按现有 `/kiosk` 设备接口提供，不要求后台登录，适用于同一可信局域网。
+
+```bash
+# 查询指定城市，城市名称须 URL 编码
+curl --get 'http://192.168.1.1:16688/kiosk/weather' --data-urlencode 'location=北京'
+
+# 查询后台配置的默认城市
+curl 'http://192.168.1.1:16688/kiosk/weather'
+```
+
+成功返回 JSON（示例仅保留一天预报，并缩短了文字报告）：
+
+```json
+{
+  "ok": true,
+  "weather": {
+    "location": {"id": "101010100", "name": "北京"},
+    "current": {"summary": "10° 晴", "details": {"湿度": "50%"}},
+    "forecast": [{"date": "11月12日", "text": "晴", "temp_max": "15°", "temp_min": "5°"}],
+    "report": "您查询的位置是：北京\n\n当前天气: 10° 晴\n…",
+    "source": "和风天气",
+    "source_url": "https://www.qweather.com/weather/beijing-101010100.html",
+    "fetched_at": 1794456000,
+    "cached": false
+  }
+}
+```
+
+`current.summary`、`current.details`、预报日期和温度沿用和风天气页面的中文显示文本，温度保留单位，缺失的最高/最低温度为 `null`。`fetched_at` 是网关实际获取该份数据的 Unix 秒时间戳；命中缓存时不改变。`cached` 表示本次是否命中服务器缓存，沿用现有天气缓存有效期（8 小时）；客户端应展示获取时间，无需高频轮询。后台保存天气设置会清空天气缓存，后续 HTTP 查询直接读取最新配置。
+
+失败返回 `{"ok": false, "code": "错误类型", "error": "可显示的中文原因"}`，客户端可根据 HTTP 状态和 `code` 处理：
+
+| HTTP 状态 | `code` | 含义 |
+| --- | --- | --- |
+| 400 | `location_required` | 未传入城市且后台未设置默认城市 |
+| 400 | `invalid_location` | 城市参数超过 128 个字符或包含控制字符 |
+| 404 | `location_not_found` | 未找到匹配城市 |
+| 503 | `weather_not_configured` | 网关未填写天气 Key 或 Host |
+| 504 | `weather_timeout` | 城市查询或天气页面请求超时 |
+| 502 | `weather_upstream_error` | 和风天气拒绝请求、网络失败、返回数据或页面格式异常 |
+
+接口不返回和风天气凭据，也不把失败结果当作天气缓存。第三方认证失败以 `502` 返回，表示网关调用上游失败；它不代表客户端需要登录管理后台。
 
 ## 6. 常见问题
 

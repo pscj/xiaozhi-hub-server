@@ -1,4 +1,5 @@
 import httpx
+import time
 from bs4 import BeautifulSoup
 from config.logger import setup_logging
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
@@ -114,6 +115,23 @@ WEATHER_CODE_MAP = {
 class WeatherServiceError(Exception):
     """可直接展示给用户的天气服务错误，不包含请求凭据。"""
 
+    def __init__(self, message, *, code="weather_upstream_error", status=502):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+def _weather_options(weather_config):
+    api_host = str(weather_config.get("api_host") or "").strip()
+    api_key = str(weather_config.get("api_key") or "").strip()
+    default_location = str(weather_config.get("default_location") or "").strip()
+    if not api_host or not api_key:
+        raise WeatherServiceError(
+            "天气服务尚未配置，请先在管理后台的“意图识别 → 查天气 → 设置”中填写 API Key 和 API Host",
+            code="weather_not_configured", status=503,
+        )
+    return api_host, api_key, default_location
+
 
 async def fetch_city_info(location, api_key, api_host):
     url = f"https://{api_host}/geo/v2/city/lookup"
@@ -128,20 +146,30 @@ async def fetch_city_info(location, api_key, api_host):
         response.raise_for_status()
         data = response.json()
     except httpx.TimeoutException:
-        raise WeatherServiceError("连接和风天气超时，请稍后重试") from None
+        raise WeatherServiceError("连接和风天气超时，请稍后重试", code="weather_timeout", status=504) from None
     except httpx.HTTPError:
         raise WeatherServiceError("请求和风天气失败，请检查 API Host 和网络连接") from None
     except ValueError:
         raise WeatherServiceError("和风天气返回了无法解析的数据，请检查 API Host") from None
+    if not isinstance(data, dict):
+        raise WeatherServiceError("和风天气返回的城市数据格式不正确")
     code = str(data.get("code", "200"))
     if data.get("error") is not None or code not in ("200", "404"):
         raise WeatherServiceError("和风天气查询失败，请检查天气设置中的凭据、API Host 和账号状态")
-    return data.get("location", [])[0] if data.get("location") else None
+    locations = data.get("location") or []
+    if not isinstance(locations, list):
+        raise WeatherServiceError("和风天气返回的城市数据格式不正确")
+    return locations[0] if locations else None
 
 
 async def fetch_weather_page(url):
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
-        response = await client.get(url, headers=HEADERS)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
+            response = await client.get(url, headers=HEADERS)
+    except httpx.TimeoutException:
+        raise WeatherServiceError("获取天气页面超时，请稍后重试", code="weather_timeout", status=504) from None
+    except httpx.HTTPError:
+        raise WeatherServiceError("获取天气页面失败，请稍后重试") from None
     return BeautifulSoup(response.text, "html.parser") if response.status_code == 200 else None
 
 
@@ -176,60 +204,41 @@ def parse_weather_info(soup):
     return city_name, current_abstract, current_basic, temps_list
 
 
-@register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
-async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh_CN"):
+async def get_weather_data(weather_config: dict, location: str = None, lang: str = "zh_CN") -> dict:
+    """供语音插件和客户端 API 共用的天气查询，不依赖设备连接或大模型。"""
     from core.utils.cache.manager import cache_manager, CacheType
 
-    weather_config = conn.config.get("plugins", {}).get("get_weather", {})
-    api_host = str(weather_config.get("api_host") or "").strip()
-    api_key = str(weather_config.get("api_key") or "").strip()
-    default_location = str(weather_config.get("default_location") or "").strip()
-    if not api_host or not api_key:
-        return ActionResponse(Action.REQLLM, "天气服务尚未配置，请先在管理后台的“意图识别 → 查天气 → 设置”中填写 API Key 和 API Host", None)
-    client_ip = conn.client_ip
-
-    # 优先使用用户提供的location参数
+    api_host, api_key, default_location = _weather_options(weather_config)
+    location = (location or "").strip() or default_location
     if not location:
-        # 通过客户端IP解析城市
-        if client_ip:
-            # 先从缓存获取IP对应的城市信息
-            cached_ip_info = cache_manager.get(CacheType.IP_INFO, client_ip)
-            if cached_ip_info:
-                location = cached_ip_info.get("city")
-            else:
-                # 缓存未命中，调用API获取
-                ip_info = get_ip_info(client_ip, logger)
-                if ip_info:
-                    cache_manager.set(CacheType.IP_INFO, client_ip, ip_info)
-                    location = ip_info.get("city")
-
-            if not location:
-                location = default_location
-        else:
-            # 若无IP，使用默认位置
-            location = default_location
-    if not location:
-        return ActionResponse(Action.REQLLM, "无法确定查询城市，请告诉我城市名称，或在管理后台的“意图识别 → 查天气 → 设置”中填写默认城市", None)
-    # 尝试从缓存获取完整天气报告
-    weather_cache_key = f"full_weather_{location}_{lang}"
-    cached_weather_report = cache_manager.get(CacheType.WEATHER, weather_cache_key)
-    if cached_weather_report:
-        return ActionResponse(Action.REQLLM, cached_weather_report, None)
-
-    # 缓存未命中，获取实时天气数据
-    try:
-        city_info = await fetch_city_info(location, api_key, api_host)
-    except WeatherServiceError as e:
-        logger.bind(tag=TAG).error(str(e))
-        return ActionResponse(Action.REQLLM, str(e), None)
-    if not city_info:
-        return ActionResponse(
-            Action.REQLLM, f"未找到相关的城市: {location}，请确认地点是否正确", None
+        raise WeatherServiceError(
+            "无法确定查询城市，请告诉我城市名称，或在管理后台的“意图识别 → 查天气 → 设置”中填写默认城市",
+            code="location_required", status=400,
         )
-    soup = await fetch_weather_page(city_info["fxLink"])
+    if len(location) > 128 or any(ord(c) < 32 for c in location):
+        raise WeatherServiceError("location 不能超过 128 个字符或包含控制字符", code="invalid_location", status=400)
+    weather_cache_key = f"weather_data_{location}_{lang}"
+    cached_weather = cache_manager.get(CacheType.WEATHER, weather_cache_key)
+    if cached_weather:
+        return {**cached_weather, "cached": True}
+
+    city_info = await fetch_city_info(location, api_key, api_host)
+    if not city_info:
+        raise WeatherServiceError(
+            f"未找到相关的城市: {location}，请确认地点是否正确", code="location_not_found", status=404,
+        )
+    if not isinstance(city_info, dict) or not city_info.get("fxLink"):
+        raise WeatherServiceError("和风天气返回的城市数据不完整，请稍后重试")
+    source_url = city_info["fxLink"]
+    soup = await fetch_weather_page(source_url)
     if not soup:
-        return ActionResponse(Action.REQLLM, None, "请求失败")
-    city_name, current_abstract, current_basic, temps_list = parse_weather_info(soup)
+        raise WeatherServiceError("获取天气页面失败，请稍后重试")
+    try:
+        city_name, current_abstract, current_basic, temps_list = parse_weather_info(soup)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        raise WeatherServiceError("天气页面数据格式发生变化，暂时无法读取天气") from None
+    if not city_name or (current_abstract == "未知" and not temps_list):
+        raise WeatherServiceError("天气页面缺少有效天气数据，请稍后重试")
 
     weather_report = f"您查询的位置是：{city_name}\n\n当前天气: {current_abstract}\n"
 
@@ -248,7 +257,38 @@ async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str
     # 提示语
     weather_report += "\n（如需某一天的具体天气，请告诉我日期）"
 
-    # 缓存完整的天气报告
-    cache_manager.set(CacheType.WEATHER, weather_cache_key, weather_report)
+    weather_data = {
+        "location": {"id": city_info.get("id"), "name": city_name},
+        "current": {"summary": current_abstract, "details": current_basic},
+        "forecast": [{"date": date, "text": weather, "temp_max": high, "temp_min": low}
+                     for date, weather, high, low in temps_list],
+        "report": weather_report,
+        "source": "和风天气",
+        "source_url": source_url,
+        "fetched_at": int(time.time()),
+    }
+    cache_manager.set(CacheType.WEATHER, weather_cache_key, weather_data)
+    return {**weather_data, "cached": False}
 
-    return ActionResponse(Action.REQLLM, weather_report, None)
+
+@register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
+async def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh_CN"):
+    from core.utils.cache.manager import cache_manager, CacheType
+
+    weather_config = conn.config.get("plugins", {}).get("get_weather", {})
+    try:
+        _weather_options(weather_config)
+        # 语音查询保留原有的 IP 定位；客户端 API 使用显式城市或后台默认城市。
+        if not location and conn.client_ip:
+            ip_info = cache_manager.get(CacheType.IP_INFO, conn.client_ip)
+            if ip_info is None:
+                ip_info = get_ip_info(conn.client_ip, logger)
+                if ip_info:
+                    cache_manager.set(CacheType.IP_INFO, conn.client_ip, ip_info)
+            if ip_info:
+                location = ip_info.get("city")
+        data = await get_weather_data(weather_config, location, lang)
+    except WeatherServiceError as e:
+        logger.bind(tag=TAG).error(str(e))
+        return ActionResponse(Action.REQLLM, str(e), None)
+    return ActionResponse(Action.REQLLM, data["report"], None)
