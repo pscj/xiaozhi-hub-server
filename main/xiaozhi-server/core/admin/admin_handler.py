@@ -57,6 +57,13 @@ SECURITY_HEADERS = {
 EMOTION_EMOJI = {name: emoji for emoji, name in EMOJI_MAP.items()}
 KIOSK_ASR_MAX_BYTES = 16000 * 2 * 10  # /kiosk/asr 最多 10 秒音频
 
+# 信息屏新闻（GET /news.json）：内容在仓库的 news-feed 分支上维护，网关只做缓存转发，
+# 缓存文件放 data/ 下（和后台登录接力文件同一目录，见 AdminHandler.__init__）
+NEWS_UPSTREAM_URL = "https://raw.githubusercontent.com/pscj/xiaozhi-hub-server/news-feed/news.json"
+NEWS_CACHE_TTL_SECONDS = 30 * 60  # 缓存在这个时长内算新鲜，直接返回、不回源
+NEWS_RETRY_SECONDS = 60  # 回源失败后至少隔这么久才再试，免得设备每次亮屏都打一次外网
+NEWS_FETCH_TIMEOUT_SECONDS = 5.0  # 回源超时：局域网设备在等着，宁可先给旧缓存也不能久等
+
 
 class AdminHandler:
     def __init__(self, config: dict, ws_server=None, config_path: Path = None, grokbot_credentials: Path = None,
@@ -68,6 +75,8 @@ class AdminHandler:
         # 后台点了更新网关、网关重启后，接着用重启前的登录（文件在 data/ 下，和配置放在一起）
         data_dir = Path(config_path).parent if config_path else updater.SERVER_DIR / "data"
         self.sessions_handover = data_dir / ".admin-sessions.json"
+        self.news_cache_path = data_dir / "news.json"
+        self._news_fetch_attempt_at = 0.0  # 上次回源拉新闻的时刻（失败也算），做最简节流
         if self.sessions.restore(self.sessions_handover):
             logger.bind(tag=TAG).info("更新网关后沿用了更新前的后台登录")
         self.updater = gateway_updater or updater.Updater()
@@ -138,6 +147,7 @@ class AdminHandler:
                 web.get("/kiosk/weather", self.handle_kiosk_weather),
                 web.get("/kiosk/chat/history", self.handle_kiosk_chat_history),
                 web.post("/kiosk/chat/clear", self.handle_kiosk_chat_clear),
+                web.get("/news.json", self.handle_news_json),
             ]
         )
 
@@ -938,6 +948,63 @@ class AdminHandler:
         merged = await self._blocking(self._merged)
         result = await self._blocking(chat_history.clear, device, merged, bool(body.get("memory_only")), online)
         return self._json({"ok": True, **result})
+
+    async def handle_news_json(self, request: web.Request):
+        """信息屏的新闻文件（GET /news.json），内容是公开新闻，不用登录（同设备接口约定）。
+
+        先用 data/news.json 的本地缓存：新鲜（NEWS_CACHE_TTL_SECONDS 内）直接返回；
+        过期才回源拉一次上游的最新文件，校验通过就刷新缓存再返回。回源失败不报错：
+        有旧缓存就返回旧的（哪怕已过期），什么都没有才回 503，设备端会继续显示占位内容。
+        """
+        cached = await self._blocking(self._read_news_cache)
+        if cached is not None and time.time() - cached[1] < NEWS_CACHE_TTL_SECONDS:
+            return self._json(cached[0])
+        now = time.time()
+        if now - self._news_fetch_attempt_at >= NEWS_RETRY_SECONDS:
+            # 先记下尝试时刻再去拉：拉取在途时并发请求看到的是"刚试过"，不会重复回源
+            self._news_fetch_attempt_at = now
+            fresh = await self._blocking(self._fetch_news_upstream)
+            if fresh is not None:
+                return self._json(fresh)
+        if cached is not None:
+            return self._json(cached[0])
+        return self._error("news not available yet", 503)
+
+    def _read_news_cache(self):
+        """读本地新闻缓存，返回 (内容, 文件修改时刻)；文件不存在或内容不合规返回 None。"""
+        try:
+            data = json.loads(self.news_cache_path.read_text(encoding="utf-8"))
+            mtime = self.news_cache_path.stat().st_mtime
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            return None
+        return data, mtime
+
+    def _fetch_news_upstream(self):
+        """回源拉一次新闻：校验是含 items 列表的 JSON 才写入缓存并返回，否则返回 None。"""
+        import httpx
+
+        try:
+            resp = httpx.get(NEWS_UPSTREAM_URL, timeout=NEWS_FETCH_TIMEOUT_SECONDS, follow_redirects=True)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(f"拉取信息屏新闻失败，有缓存时继续用缓存: {e}")
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            self.logger.bind(tag=TAG).warning("信息屏新闻的上游内容不是预期的 {items: [...]} 结构，忽略")
+            return None
+        try:
+            self.news_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.news_cache_path.parent, prefix=".news-", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, self.news_cache_path)
+        except OSError as e:
+            # 缓存写不进去只影响下次的新鲜度，本次照常把刚拉到的内容返回
+            self.logger.bind(tag=TAG).warning(f"信息屏新闻缓存写入失败: {e}")
+        return data
 
     # ---------- 工作原理 ----------
 
