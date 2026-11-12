@@ -201,7 +201,33 @@ def parse_weather_info(soup):
         high_temp, low_temp = (temps[0], temps[-1]) if len(temps) >= 2 else (None, None)
         temps_list.append((date, weather, high_temp, low_temp))
 
-    return city_name, current_abstract, current_basic, temps_list
+    # 当前温度与当前状况在 .current-live 里：带 <p> 的那一项里两个 <p> 依次是温度（如「10°」）
+    # 和状况（如「霾」）。防御式提取：缺失或格式异常时保持 None，绝不影响上面的结果。
+    current_temp = None
+    current_condition = None
+    try:
+        for item in soup.select(
+            ".c-city-weather-current .current-live .current-live__item"
+        ):
+            texts = [p.get_text(strip=True) for p in item.find_all("p")]
+            if len(texts) >= 2:
+                temp_text = texts[0].replace("°", "").strip()
+                if temp_text:
+                    current_temp = temp_text
+                    current_condition = texts[1] or None
+                break
+    except (AttributeError, IndexError, TypeError, ValueError):
+        current_temp = None
+        current_condition = None
+
+    return (
+        city_name,
+        current_abstract,
+        current_basic,
+        temps_list,
+        current_temp,
+        current_condition,
+    )
 
 
 async def get_weather_data(weather_config: dict, location: str = None, lang: str = "zh_CN") -> dict:
@@ -234,7 +260,14 @@ async def get_weather_data(weather_config: dict, location: str = None, lang: str
     if not soup:
         raise WeatherServiceError("获取天气页面失败，请稍后重试")
     try:
-        city_name, current_abstract, current_basic, temps_list = parse_weather_info(soup)
+        (
+            city_name,
+            current_abstract,
+            current_basic,
+            temps_list,
+            current_temp,
+            current_condition,
+        ) = parse_weather_info(soup)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         raise WeatherServiceError("天气页面数据格式发生变化，暂时无法读取天气") from None
     if not city_name or (current_abstract == "未知" and not temps_list):
@@ -257,9 +290,16 @@ async def get_weather_data(weather_config: dict, location: str = None, lang: str
     # 提示语
     weather_report += "\n（如需某一天的具体天气，请告诉我日期）"
 
+    # 当前温度/状况提取到才加键，提取不到保持旧形状（旧缓存与旧客户端都兼容）。
+    current_data = {"summary": current_abstract, "details": current_basic}
+    if current_temp is not None:
+        current_data["temp"] = current_temp
+    if current_condition is not None:
+        current_data["condition"] = current_condition
+
     weather_data = {
         "location": {"id": city_info.get("id"), "name": city_name},
-        "current": {"summary": current_abstract, "details": current_basic},
+        "current": current_data,
         "forecast": [{"date": date, "text": weather, "temp_max": high, "temp_min": low}
                      for date, weather, high, low in temps_list],
         "report": weather_report,
