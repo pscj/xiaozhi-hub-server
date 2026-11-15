@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 TAG = __name__
 
 
-async def handleAbortMessage(conn: "ConnectionHandler", played_ms=None, drop_audio=False):
+async def handleAbortMessage(conn: "ConnectionHandler", played_ms=None, drop_audio=False, reason=None):
     """played_ms：设备报告的这一轮回复已经播了多少毫秒（没有时按发送进度估算）。
     drop_audio：设备自己发的打断（唤醒词、按钮）：说完还没识别完的那句话、排队没处理的录音都不要了。
     服务端回声消除和新问题触发的打断不丢，那时缓冲里是用户新说的话。"""
@@ -32,9 +32,10 @@ async def handleAbortMessage(conn: "ConnectionHandler", played_ms=None, drop_aud
         conn.llm.abort(conn)
     conn.clear_queues()
     # 打断客户端说话状态
-    await conn.websocket.send(
-        json.dumps({"type": "tts", "state": "stop", "interrupted": True, "session_id": conn.session_id})
-    )
+    message = {"type": "tts", "state": "stop", "interrupted": True, "session_id": conn.session_id}
+    if reason is not None:
+        message["reason"] = reason
+    await conn.websocket.send(json.dumps(message))
     conn.clearSpeakStatus()
     conn.logger.bind(tag=TAG).info("Abort message received-end")
 

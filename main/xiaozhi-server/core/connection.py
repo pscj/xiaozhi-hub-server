@@ -121,6 +121,7 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
         self.client_aec = False  # 是否启用了服务端AEC
+        self.interrupt_only = False  # 回答期间仅接受停止词，实际播完后由设备恢复普通收音
 
         # 线程任务相关
         self.loop = None  # 在 handle_connection 中获取运行中的事件循环
@@ -1834,6 +1835,7 @@ class ConnectionHandler:
         self.asr_audio.clear()
         self.asr_voice_end = 0
         self.asr_echo_context = None
+        self.asr_interrupt_only = None
         self.asr_segment_start = 0
         self.asr_segments = []
 

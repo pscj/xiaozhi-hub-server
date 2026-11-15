@@ -62,6 +62,8 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
     if features and features.get("vad_end"):
         # [xiaozhi-hub] 告诉客户端这个网关会发 VAD 事件（含"什么也没识别出来"），它不必干等兜底超时
         welcome = {**welcome, "features": {**(welcome.get("features") or {}), "vad_end": True}}
+    if features and "speech_interrupt" in features:
+        welcome = {**welcome, "features": {**(welcome.get("features") or {}), "speech_interrupt": True}}
     await conn.websocket.send(json.dumps(welcome))
 
     # 客户端收到 hello 后才能接收播报；组件初始化结束后再说准备好了。

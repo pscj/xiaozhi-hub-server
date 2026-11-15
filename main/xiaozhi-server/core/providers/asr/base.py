@@ -15,11 +15,12 @@ from abc import ABC, abstractmethod
 from config.logger import setup_logging
 from core.providers.asr.dto.dto import InterfaceType
 from core.handle.receiveAudioHandle import startToChat
+from core.handle.abortHandle import handleAbortMessage
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
 from core.agent.asr_text import correct_and_record  # [xiaozhi-hub]
-from core.utils import reply_echo, turn_gen  # [xiaozhi-hub]
+from core.utils import reply_echo, speech_interrupt, turn_gen  # [xiaozhi-hub]
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
 
 
@@ -40,7 +41,7 @@ async def send_vad_event(conn: "ConnectionHandler", state: str):
     """[xiaozhi-hub] 给 hello 里声明了 features.vad_end 的客户端发 {"type": "vad", "state": ...}：
     end = 判定说完、开始识别（界面显示"正在识别"）；empty = 这句什么也没识别出来（咳嗽、太短、只有回声、
     识别出错），客户端不用再等文字，马上提示"没听清"。"""
-    if not (conn.features or {}).get("vad_end"):
+    if speech_interrupt.active(conn) or not (conn.features or {}).get("vad_end"):
         return
     try:
         await conn.websocket.send(json.dumps({"type": "vad", "state": state, "session_id": conn.session_id}))
@@ -102,6 +103,7 @@ class ASRProviderBase(ABC):
             # 自动/实时模式：使用VAD检测
             if audio_have_voice and not getattr(conn, "asr_voice_end", 0):
                 conn.asr_echo_context = reply_echo.capture_context(conn)
+                conn.asr_interrupt_only = speech_interrupt.active(conn)
             conn.asr_audio.append(pcm_frame)
             if audio_have_voice:
                 conn.asr_voice_end = len(conn.asr_audio)  # [xiaozhi-hub] 最后一帧有声音的位置
@@ -122,7 +124,9 @@ class ASRProviderBase(ABC):
                 voice_end = getattr(conn, "asr_voice_end", 0) or len(conn.asr_audio)
                 pcm_bytes = b"".join(conn.asr_audio[:voice_end]) + b"".join(conn.asr_audio[voice_end:])[:ASR_TAIL_BYTES]
                 # 检查是否有足够的音频数据（每帧1920字节，15帧约28800字节）
-                if len(pcm_bytes) > 1920 * 15:
+                # 两字停止词常不足原来的 0.9 秒门槛，仍需保留正常提问的短噪声保护。
+                minimum_bytes = 6400 if speech_interrupt.active(conn) else 1920 * 15
+                if len(pcm_bytes) > minimum_bytes:
                     segments = getattr(conn, "asr_segments", None) or []
                     start = getattr(conn, "asr_segment_start", 0)
                     # 最后一段切完后没再说话：剩下的只是静音，不用再识别
@@ -171,6 +175,9 @@ class ASRProviderBase(ABC):
             # [xiaozhi-hub] 识别要 1～2 秒，期间设备可能打断了这一句（唤醒词、按钮）：识别完代次变了就丢掉
             gen = turn_gen.current(conn)
             echo_context = getattr(conn, "asr_echo_context", None)
+            interrupt_only = getattr(conn, "asr_interrupt_only", None)
+            if interrupt_only is None:
+                interrupt_only = speech_interrupt.active(conn)
 
             # 数据已经是PCM直接使用
             pcm_data = asr_audio_task
@@ -283,6 +290,13 @@ class ASRProviderBase(ABC):
             if text_len > 0 and turn_gen.stale(conn, gen):
                 logger.bind(tag=TAG).info(f"识别中被打断，丢掉这句: {content_for_length_check}")
                 text_len = 0
+
+            action = speech_interrupt.action(conn, content_for_length_check, interrupt_only)
+            if action != "chat":
+                if text_len > 0 and action == "stop":
+                    conn.logger.bind(tag=TAG).info("停止词打断当前回答")
+                    await handleAbortMessage(conn, drop_audio=True, reason="stop_word")
+                return
 
             if text_len > 0:
                 audio_snapshot = pcm_data.copy()

@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 from core.utils.dialogue import Message
 from core.providers.asr.dto.dto import InterfaceType
 from core.handle.receiveAudioHandle import startToChat
+from core.handle.abortHandle import _drop_pending_audio
+from core.utils import speech_interrupt, turn_gen
 from core.handle.reportHandle import enqueue_asr_report
 from core.handle.sendAudioHandle import send_stt_message, send_tts_message
 from core.handle.textMessageHandler import TextMessageHandler
@@ -33,6 +35,12 @@ class ListenTextMessageHandler(TextMessageHandler):
                 f"客户端拾音模式：{conn.client_listen_mode}"
             )
         if msg_json["state"] == "start":
+            was_interrupt_only = getattr(conn, "interrupt_only", False)
+            conn.interrupt_only = msg_json.get("purpose") == "interrupt"
+            if was_interrupt_only and not conn.interrupt_only and speech_interrupt.restricted(conn):
+                # 回答期间的话不能在播放结束后被当成下一句问题。
+                turn_gen.bump(conn)
+                _drop_pending_audio(conn)
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
         elif msg_json["state"] == "stop":

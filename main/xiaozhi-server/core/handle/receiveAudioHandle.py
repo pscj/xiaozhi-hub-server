@@ -12,7 +12,7 @@ from core.agent.call_names import handle_call_name
 from core.handle.abortHandle import handleAbortMessage
 from core.handle.intentHandler import handle_user_intent, speak_txt
 from core.utils.output_counter import check_device_output_limit
-from core.utils import turn_gen
+from core.utils import speech_interrupt, turn_gen
 from core.handle.sendAudioHandle import send_stt_message, SentenceType
 
 TAG = __name__
@@ -32,7 +32,7 @@ async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
             conn.vad_resume_task = asyncio.create_task(resume_vad_detection(conn))
         return
     # 服务端AEC功能需要实时触发打断
-    if conn.client_aec and have_voice:
+    if conn.client_aec and have_voice and not speech_interrupt.restricted(conn):
         if conn.client_is_speaking and conn.client_listen_mode != "manual":
             await handleAbortMessage(conn)
     # 设备长时间空闲检测，用于say goodbye
