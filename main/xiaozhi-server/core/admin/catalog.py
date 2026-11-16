@@ -15,7 +15,7 @@ LLM_VENDORS = [
      "models": ["gemini-2.5-flash", "gemini-2.5-pro"]},
     {"id": "deepseek", "label": "DeepSeek", "entry": "DeepSeekLLM",
      "base_url": "https://api.deepseek.com",
-     "models": ["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]},
+     "models": ["deepseek-flash", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]},
     {"id": "qwen", "label": "通义千问", "entry": "AliLLM",
      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
      "models": ["qwen-flash", "qwen-plus", "qwen-max"]},

@@ -34,6 +34,15 @@ class LLMProvider(LLMProviderBase):
         else:
             self.base_url = config.get("url")
         self.extra_body = config.get("extra_body")  # [xiaozhi-hub]
+        # [xiaozhi-hub] 官方联网工具目前使用 deepseek-flash；旧模型继续按原方式对话。
+        domain = urlparse(self.base_url or "").hostname or ""
+        is_deepseek = domain == "deepseek.com" or domain.endswith(".deepseek.com")
+        self.web_search = config.get("web_search", is_deepseek) is True
+        if self.web_search and self.model_name != "deepseek-flash":
+            logger.bind(tag=TAG).warning(
+                "DeepSeek 联网搜索需要 deepseek-flash，当前模型不启用联网工具"
+            )
+            self.web_search = False
 
         timeout_config = config.get("timeout")
         if isinstance(timeout_config, dict):
@@ -126,6 +135,18 @@ class LLMProvider(LLMProviderBase):
         if isinstance(self.extra_body, dict) and self.extra_body:
             request_params.setdefault("extra_body", {}).update(self.extra_body)
 
+    def _apply_web_search(self, request_params: dict):
+        """声明服务端搜索工具，与设备的 function 工具共存，无须客户端执行。"""
+        if not self.web_search:
+            return
+        # extra_body 会覆盖 SDK 参数，须在最终生效的 tools 中追加；不修改配置或调用方的列表。
+        body = request_params.get("extra_body", {})
+        target = body if "tools" in body else request_params
+        tools = list(target.get("tools") or [])
+        if not any(tool.get("type") == "deepseek_web_search" for tool in tools):
+            tools.append({"type": "deepseek_web_search"})
+        target["tools"] = tools
+
     def response(self, session_id, dialogue, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
 
@@ -149,6 +170,7 @@ class LLMProvider(LLMProviderBase):
 
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
+        self._apply_web_search(request_params)
 
         responses = self.client.chat.completions.create(**request_params)
         self._track(session_id, responses)
@@ -197,6 +219,7 @@ class LLMProvider(LLMProviderBase):
 
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
+        self._apply_web_search(request_params)
 
         stream = self.client.chat.completions.create(**request_params)
         self._track(session_id, stream)

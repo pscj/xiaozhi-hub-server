@@ -702,9 +702,11 @@ LLM:
     # 定义LLM API类型
     type: openai
     # 可在这里找到你的api key https://platform.deepseek.com/
-    model_name: deepseek-v4-flash
+    # 联网工具要求 deepseek-flash，由模型自动判断是否搜索
+    model_name: deepseek-flash
     url: https://api.deepseek.com
     api_key: 你的deepseek web key
+    web_search: true # false 关闭联网搜索；旧模型不声明联网工具
   ChatGLMLLM:
     # 定义LLM API类型
     type: openai
