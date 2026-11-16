@@ -423,9 +423,8 @@ ASR:
     model_dir: models/sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03
     output_dir: tmp/
     model_type: transducer
-    # [xiaozhi-hub] 线程数对齐物理核：实际部署的路由器是 MT7981A（双核 Cortex-A53），填 4 是超订、
-    # 线程互抢反而更慢（「4 线程比 2 快 20%」是上游 8 核板子的实测，不适用于这台）
-    num_threads: 2
+    # [xiaozhi-hub] 线程数对齐物理核：实际部署的路由器是四核，4 线程正好对齐（2026-11-16 更正，此前误按双核填 2）
+    num_threads: 4
     # [xiaozhi-hub] 边说边识别：句中停顿 300 毫秒就先识别前面这段，说完只剩最后一段，长句快 1.5～3 秒。
     # 代价是跨段没有上下文，偶尔认错同音字（合成声 36 条长句字错率 0.09% → 0.46%，多出来的都是"她/他/它"）。填 0 关闭
     segment_pause_ms: 300
