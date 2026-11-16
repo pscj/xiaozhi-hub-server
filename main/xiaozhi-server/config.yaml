@@ -651,8 +651,8 @@ VAD:
     threshold: 0.5
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
-    # [xiaozhi-hub] 原为 200，稍一停顿就被当成说完；改为 800。也可以在管理后台“语音识别”页调整
-    min_silence_duration_ms: 800  # 如果说话停顿比较长，可以把这个值设置大一些
+    # [xiaozhi-hub] 原为 200，稍一停顿就被当成说完；曾改 800，断句等待太久，2026-11-16 改到 400 压延迟。也可以在管理后台“语音识别”页调整
+    min_silence_duration_ms: 400  # 如果说话停顿比较长，可以把这个值设置大一些
 
 LLM:
   # Muse 是可选依赖；先按 docs/muse.md 安装 SDK 并完成 Linux 蓝牙配对。
