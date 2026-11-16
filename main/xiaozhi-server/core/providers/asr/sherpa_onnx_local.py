@@ -162,7 +162,9 @@ class ASRProvider(ASRProviderBase):
 
     def _transducer_hotwords(self, hotwords: str, config: dict) -> dict:
         """[xiaozhi-hub] transducer 的热词：解码时给热词加分（modified_beam_search），不会凭空编出词来。
-        BPE 词表的模型需要 model_dir 下有 bpe.vocab（可用 sentencepiece 从 bpe.model 导出）。"""
+        BPE 词表的模型需要 model_dir 下有 bpe.vocab（可用 sentencepiece 从 bpe.model 导出）。
+        max_active_paths 是 beam 同时保留的候选路径数：sherpa-onnx 默认 4，这里默认收窄到 2 给弱 CPU
+        提速（热词功能保留），代价是极端情况下热词纠偏略弱；配置 max_active_paths 可调回（如 4）。"""
         words = [w.strip() for w in hotwords.split(",") if w.strip()]
         if not words:
             return {}
@@ -175,6 +177,7 @@ class ASRProvider(ASRProviderBase):
             f.write(content)
         return {
             "decoding_method": "modified_beam_search",
+            "max_active_paths": int(config.get("max_active_paths") or 2),
             "hotwords_file": path,
             "hotwords_score": float(config.get("hotwords_score") or 1.5),
             "modeling_unit": config.get("modeling_unit") or ("bpe" if has_bpe else "cjkchar"),
