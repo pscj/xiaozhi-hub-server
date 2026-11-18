@@ -558,6 +558,7 @@ class MuseSession(AgentSession):
             yield Activity("Muse", tools_running=1)
             # 只输出确认完成的回复，避免 Muse 最终修订文字被朗读两次。
             emitted = set()
+            marker_checked = False  # 闹钟桥只看回合回复的第一段文本（见 alarm_bridge）
             while not self._interrupt.is_set():
                 if pump.done():
                     await pump
@@ -572,7 +573,19 @@ class MuseSession(AgentSession):
                         claim = getattr(self.bridge, "claim", None)
                         if claim is not None:
                             claim(self._id, reply.message_id)  # 这条已念给设备，常驻订阅不要重复汇报
-                        yield TextDelta(reply.text + "\n")
+                        text = reply.text
+                        if not marker_checked:
+                            marker_checked = True
+                            # 闹钟桥：回复第一行若是【闹钟】标记，在文本离开这里之前
+                            # 剥掉并安排执行——下游（provider→connection）只会看到剥后
+                            # 的文本，标记绝不进 TTS 和对话记录。整条回复只有标记行
+                            # 时不产生空 TextDelta。
+                            from core.agent import alarm_bridge
+
+                            text, consumed = alarm_bridge.process_first_text(self.device_key, text)
+                            if consumed and not text.strip():
+                                continue
+                        yield TextDelta(text + "\n")
                 if turn.complete(time.monotonic()) and (emitted or turn.task_finished):
                     if not emitted:
                         raise ValueError("Muse returned no correlated reply")
