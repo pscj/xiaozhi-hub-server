@@ -23,3 +23,17 @@ LLM:
 默认沿用语音对话的非思考模式。需要深度思考搜索时，在同一条目下添加 `extra_body: {thinking: {type: enabled}}`；搜索声明与思考开关独立。
 
 可以询问“请联网查询今天的科技新闻并总结”，检查回答及 DeepSeek 平台用量。是否触发搜索仍由模型决定；工具调用按官方规则另行计费。
+
+## 设备/插件工具（deepseek_tool_mode）
+
+DeepSeek 端点还有一条规矩：请求里带客户端工具（设备 MCP 工具、插件函数）时，必须同时开启思考模式并声明 `deepseek_web_search`，缺一不可，否则直接返回 400（`tools: client tools can only be used together with deepseek_web_search in thinking mode`）。普通对话不受这条规矩影响。
+
+在 DeepSeek 条目下打开开关后，带工具的请求会自动满足：思考模式改为开启，并确保搜索工具已声明（与 `web_search` 开关、模型名无关）；普通对话请求不做任何改动，仍按非思考模式走。
+
+```yaml
+LLM:
+  DeepSeekLLM:
+    deepseek_tool_mode: true
+```
+
+经代理（如 OpenCode Go 托管端点）访问时同样适用：在该代理对应的 LLM 条目上配置即可，不要求域名是 deepseek.com。重启服务后生效。

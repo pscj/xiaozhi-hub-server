@@ -707,6 +707,7 @@ LLM:
     url: https://api.deepseek.com
     api_key: 你的deepseek web key
     web_search: true # false 关闭联网搜索；旧模型不声明联网工具
+    deepseek_tool_mode: false # true：带设备/插件工具的请求自动开启思考模式并声明联网工具（DeepSeek 端点要求二者缺一不可，否则报 400）；普通对话不受影响
   ChatGLMLLM:
     # 定义LLM API类型
     type: openai

@@ -43,6 +43,13 @@ class LLMProvider(LLMProviderBase):
                 "DeepSeek 联网搜索需要 deepseek-flash，当前模型不启用联网工具"
             )
             self.web_search = False
+        # [xiaozhi-hub] DeepSeek 端点规矩：请求带客户端工具（设备/插件函数）时，
+        # 必须同时开启思考模式并声明 deepseek_web_search，否则端点返回 400
+        # （client tools can only be used together with `deepseek_web_search`
+        # in thinking mode）。默认关；只在 DeepSeek 条目里显式配置
+        # deepseek_tool_mode: true 才启用，且只作用于带工具的请求
+        # （见 _apply_deepseek_tool_mode），普通对话请求逐字不变。
+        self.deepseek_tool_mode = config.get("deepseek_tool_mode", False) is True
 
         timeout_config = config.get("timeout")
         if isinstance(timeout_config, dict):
@@ -147,6 +154,25 @@ class LLMProvider(LLMProviderBase):
             tools.append({"type": "deepseek_web_search"})
         target["tools"] = tools
 
+    def _apply_deepseek_tool_mode(self, request_params: dict, functions):
+        """让带客户端工具的请求满足 DeepSeek 端点的规矩（见 __init__ 注释）。
+
+        在 _apply_thinking_disabled 与 _apply_web_search 之后调用：
+        - 思考模式改为开启，覆盖域名默认与配置 extra_body 里的 disabled；
+        - 确保 deepseek_web_search 已声明（web_search 开关关着、或模型不是
+          deepseek-flash 时 _apply_web_search 不会声明，这里补上）。
+        开关关着、或本请求没带工具函数时什么都不做。
+        """
+        if not self.deepseek_tool_mode or not functions:
+            return
+        request_params.setdefault("extra_body", {})["thinking"] = {"type": "enabled"}
+        body = request_params.get("extra_body", {})
+        target = body if "tools" in body else request_params
+        tools = list(target.get("tools") or [])
+        if not any(tool.get("type") == "deepseek_web_search" for tool in tools):
+            tools.append({"type": "deepseek_web_search"})
+        target["tools"] = tools
+
     def response(self, session_id, dialogue, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
 
@@ -220,6 +246,8 @@ class LLMProvider(LLMProviderBase):
         # 禁用思考模式
         self._apply_thinking_disabled(request_params)
         self._apply_web_search(request_params)
+        # 带客户端工具时按 DeepSeek 端点规矩改开思考并补声明搜索工具（开关默认关）
+        self._apply_deepseek_tool_mode(request_params, functions)
 
         stream = self.client.chat.completions.create(**request_params)
         self._track(session_id, stream)

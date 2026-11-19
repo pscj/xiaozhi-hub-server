@@ -131,6 +131,68 @@ def test_device_function_calls_still_reach_caller(api):
 
 
 @pytest.mark.parametrize("mode", ["plain", "functions"])
+def test_tool_mode_only_changes_function_requests(api, mode):
+    """deepseek_tool_mode 开：带工具的请求改开思考并确保声明搜索工具；
+    普通对话请求与未开开关时逐字一致（思考仍禁用）。"""
+    requests, _ = api
+    functions = copy.deepcopy([FUNCTION])
+    llm = provider(deepseek_tool_mode=True)
+    list(respond(llm, mode, functions))
+    if mode == "functions":
+        assert requests[0]["thinking"] == {"type": "enabled"}
+        assert requests[0]["tools"] == [FUNCTION, SEARCH]
+    else:
+        assert requests[0]["thinking"] == {"type": "disabled"}
+        assert requests[0]["tools"] == [SEARCH]
+    assert functions == [FUNCTION]
+
+
+def test_tool_mode_default_off_keeps_thinking_disabled(api):
+    requests, _ = api
+    list(respond(provider(), "functions", [FUNCTION]))
+    assert requests[0]["thinking"] == {"type": "disabled"}
+    list(respond(provider(deepseek_tool_mode=False), "functions", [FUNCTION]))
+    assert requests[1]["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.parametrize("overrides", [
+    {"web_search": False},  # 联网开关关着：工具模式自己补声明
+    {"model_name": "deepseek-v4-flash", "web_search": True},  # 非 flash 模型：web_search 被强制关
+    {"base_url": "https://proxy.example.org/v1", "model_name": "deepseek-v4-flash"},  # 代理端点
+])
+def test_tool_mode_declares_search_regardless_of_web_search(api, overrides):
+    requests, _ = api
+    list(respond(provider(deepseek_tool_mode=True, **overrides), "functions", [FUNCTION]))
+    assert requests[0]["thinking"] == {"type": "enabled"}
+    assert requests[0]["tools"] == [FUNCTION, SEARCH]
+
+
+def test_tool_mode_without_functions_changes_nothing(api):
+    requests, _ = api
+    llm = provider(deepseek_tool_mode=True, web_search=False)
+    list(respond(llm, "functions", []))
+    assert requests[0]["tools"] == []
+    assert requests[0]["thinking"] == {"type": "disabled"}
+
+
+def test_tool_mode_thinking_stream_reasoning_not_output_tool_call_kept(api):
+    """思考模式的流：reasoning_content 不进输出正文，客户端工具调用照常解析。"""
+    requests, chunks = api
+    chunks.extend([
+        chunk({"reasoning_content": "先想一下"}),
+        chunk({"reasoning_content": "再想想", "content": "好的"}),
+        chunk({"tool_calls": [{"index": 0, "id": "fn-1", "type": "function",
+                               "function": {"name": "get_volume", "arguments": "{}"}}]}),
+    ])
+    result = list(respond(provider(deepseek_tool_mode=True), "functions", [FUNCTION]))
+    text = "".join(item[0] or "" for item in result)
+    assert text == "好的"
+    call = next(tools[0] for _, tools in result if tools)
+    assert call.function.name == "get_volume"
+    assert requests[0]["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.parametrize("mode", ["plain", "functions"])
 def test_generation_error_after_search_is_not_treated_as_success(api, mode):
     _, chunks = api
     chunks.extend([chunk({"content": "开始"}),
