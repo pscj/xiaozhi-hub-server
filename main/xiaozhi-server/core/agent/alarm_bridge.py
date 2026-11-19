@@ -355,14 +355,152 @@ async def _execute_inner(device_key, spec):
 
 # ---------- 回合入口：MuseSession.send() 发射第一段回复文本时调用 ----------
 
+def _first_content_line(text):
+    """文本里第一个非空行（剥过首尾空白）；没有返回空串。"""
+    for line in (text or "").split("\n"):
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def strip_marker_from_final(text, marker_line):
+    """从最终文本里剥掉与标记行对应的第一行；没有对应行时原样返回。
+
+    最终文本（display_text）对标记行的渲染与增量原文不总是一致：可能原样
+    保留，也可能丢掉【闹钟】前缀、只剩 JSON 那一行（2026-11-19 08:35 实测：
+    桥从增量命中、最终文本原样下发，JSON 行就这么漏进 TTS 和对话列表）。
+    两种形态出现在首个非空行时都剥掉；首个非空行是别的内容，说明最终文本
+    已把标记行整行丢掉、正文就是首行，不动它。
+    """
+    if not text or not marker_line:
+        return text
+    payload = marker_line[len(MARKER):].strip() if marker_line.startswith(MARKER) else ""
+    lines = text.split("\n")
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return text
+    first = lines[idx].strip()
+    if first == marker_line or (payload and first == payload):
+        return "\n".join(lines[idx + 1:]).strip()
+    return text
+
+
+def _dispatch(device_key, spec, error, source):
+    """命中标记后的统一出口：记日志，安排执行或失败补播报。"""
+    if error is not None:
+        logger.bind(tag=TAG).warning(f"闹钟标记解析失败：{error}，来源={source}，设备={device_key}")
+        announce(device_key, failure_text(None, error))
+        return
+    logger.bind(tag=TAG).info(
+        f"闹钟标记命中：来源={source}，action={spec.get('action')}，设备={device_key}")
+    if device_key:
+        try:
+            asyncio.ensure_future(execute(device_key, spec))
+        except RuntimeError:
+            logger.bind(tag=TAG).warning("闹钟桥没有可用的事件循环，跳过执行")
+            announce(device_key, failure_text(spec, "设备还没准备好"))
+
+
+def handle_marker_line(device_key, marker_line, source="增量"):
+    """一行已确认的闹钟标记（首行前缀门交出）：解析并安排执行/失败补播报。
+
+    返回 True 表示这一行确实是标记——合法的安排执行，非法的走失败补播报；
+    不是标记则返回 False、零副作用。
+    """
+    _, spec, error = extract(marker_line)
+    if spec is None and error is None:
+        return False
+    _dispatch(device_key, spec, error, source)
+    return True
+
+
+class FirstLineGate:
+    """回合首行前缀门（纯逻辑）：send() 放行首段文本前先判定是不是闹钟标记。
+
+    把增量逐段喂进来，只攒到「已到达文本不再可能是标记前缀」为止：累积
+    文本与 MARKER 在某个字符分叉（普通回复通常第一个字就分叉，如「好的…」）
+    即判普通，缓冲原样放行、之后直通，普通回复的额外延迟约一个字；以
+    「【」开头但第二字分叉（如【播报】类）同样立即放行。确认以 MARKER
+    开头后继续攒到首行结束（换行），整行作为标记行交出；攒过 MAX_BUFFER
+    仍定不下来按普通文本放行，防死等。feed() 返回 (放行文本, 标记行或
+    None)；finish() 在流结束时对残留缓冲收尾——恰好是一行标记则交出它，
+    残缺的标记前缀原样放行。
+    """
+
+    MAX_BUFFER = 300
+
+    def __init__(self):
+        self._buf = ""
+        self.decided = False
+
+    def feed(self, text):
+        if self.decided:
+            return text or "", None
+        self._buf += text or ""
+        return self._decide(final=False)
+
+    def finish(self):
+        if self.decided:
+            return "", None
+        return self._decide(final=True)
+
+    def _release(self, text):
+        self.decided = True
+        self._buf = ""
+        return text, None
+
+    def _decide(self, final):
+        buf = self._buf
+        pos = 0
+        while True:  # 跳过前置空行，与 extract 的容忍口径一致
+            nl = buf.find("\n", pos)
+            line = buf[pos:] if nl < 0 else buf[pos:nl]
+            if line.strip():
+                break
+            if nl < 0:  # 到目前为止只有空白
+                if final or len(buf) > self.MAX_BUFFER:
+                    return self._release(buf)
+                return "", None
+            pos = nl + 1
+        probe = buf[pos:].lstrip()
+        nl = probe.find("\n")
+        first_line = probe if nl < 0 else probe[:nl]
+        n = 0
+        while n < len(first_line) and n < len(MARKER) and first_line[n] == MARKER[n]:
+            n += 1
+        if n < len(first_line) and n < len(MARKER):
+            return self._release(buf)  # 第 n 个字符与标记分叉：普通文本
+        if len(first_line) < len(MARKER):
+            # 首行还是 MARKER 的真前缀：行已结束（或流结束）就不是标记了
+            if nl >= 0 or final or len(buf) > self.MAX_BUFFER:
+                return self._release(buf)
+            return "", None
+        # 首行以完整 MARKER 开头
+        if nl >= 0:
+            self.decided = True
+            self._buf = ""
+            return probe[nl + 1:], first_line.strip()
+        if final:  # 整段就是一行标记
+            self.decided = True
+            self._buf = ""
+            return "", first_line.strip()
+        if len(buf) > self.MAX_BUFFER:
+            return self._release(buf)
+        return "", None
+
+
 def process_first_text(device_key, text, streamed=None):
     """处理回合回复的第一段文本。返回 (要继续往下发的文本, 是否命中了标记)。
 
     两个来源都查标记（与常驻监听 watcher 同款做法）：最终文本（reply.text，
     即 display_text/transcript）会丢开头的标记行、增量累积（reply.streamed）
     里却完整（反之亦可能）。最终文本命中时以它为准（剥掉标记行再往下发）；
-    最终文本没有、增量里有时，判定与执行参数取增量的，下发文本仍用最终
-    文本——它本来就不含标记行，无需剥除。两边都有也只执行一次。
+    最终文本没有、增量里有时，判定与执行参数取增量的，下发文本里与标记行
+    对应的那行一并剥掉（最终文本的渲染可能把标记行改了模样，如丢掉前缀
+    只剩 JSON——见 strip_marker_from_final）；最终文本已把整行丢掉时不动它。
+    两边都有也只执行一次。
 
     没标记时原样返回、零副作用；解析失败则安排一句失败补播报——任何情况
     都不会让回合崩溃。
@@ -374,19 +512,8 @@ def process_first_text(device_key, text, streamed=None):
         if alt_spec is not None or alt_error is not None:
             spec, error = alt_spec, alt_error
             source = "增量"
-            stripped = text  # 最终文本里没有标记行可剥，原样下发
+            stripped = strip_marker_from_final(text, _first_content_line(streamed))
     if spec is None and error is None:
         return text, False
-    if error is not None:
-        logger.bind(tag=TAG).warning(f"闹钟标记解析失败：{error}，来源={source}，设备={device_key}")
-        announce(device_key, failure_text(None, error))
-        return stripped, True
-    logger.bind(tag=TAG).info(
-        f"闹钟标记命中：来源={source}，action={spec.get('action')}，设备={device_key}")
-    if device_key:
-        try:
-            asyncio.ensure_future(execute(device_key, spec))
-        except RuntimeError:
-            logger.bind(tag=TAG).warning("闹钟桥没有可用的事件循环，跳过执行")
-            announce(device_key, failure_text(spec, "设备还没准备好"))
+    _dispatch(device_key, spec, error, source)
     return stripped, True

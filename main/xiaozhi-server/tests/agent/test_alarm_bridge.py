@@ -379,3 +379,127 @@ async def test_deliver_mixed_segments_only_recorded_goes_to_speak_txt(monkeypatc
         reports.clear()
     assert recorded == ["普通待汇报。"]  # 只念不记的那段没进对话路径
     assert ("sentence", "闹钟已设好。") in conn.tts.calls
+
+
+# ---------- 首行前缀门（流式判定：分叉即放行、真标记整行吞） ----------
+
+def test_gate_normal_first_char_releases_immediately():
+    gate = alarm_bridge.FirstLineGate()
+    release, marker = gate.feed("好")
+    # 普通回复第一个字就与标记分叉：不等首行齐，立即原样放行
+    assert marker is None and release == "好" and gate.decided
+    release2, marker2 = gate.feed("的，我看一下。")
+    assert marker2 is None and release + release2 == "好的，我看一下。"
+
+
+def test_gate_normal_reply_pieces_concatenate_identically():
+    gate = alarm_bridge.FirstLineGate()
+    out = ""
+    for piece in ["今", "天", "天气", "不错，", "适合出门。"]:
+        release, marker = gate.feed(piece)
+        assert marker is None
+        out += release
+    out += gate.finish()[0]
+    assert out == "今天天气不错，适合出门。"
+
+
+def test_gate_bracket_but_second_char_diverges_releases():
+    gate = alarm_bridge.FirstLineGate()
+    release, marker = gate.feed("【")
+    assert (release, marker) == ("", None) and not gate.decided  # 还可能是标记，先攒
+    release, marker = gate.feed("播报】今天有雨。")
+    assert marker is None and gate.decided
+    assert release == "【播报】今天有雨。"  # 【播报】类：第二字分叉，整段原样放行
+
+
+def test_gate_divergence_after_partial_prefix():
+    gate = alarm_bridge.FirstLineGate()
+    assert gate.feed("【闹") == ("", None)
+    release, marker = gate.feed("钟表坏了。")
+    assert marker is None and release == "【闹钟表坏了。"
+
+
+def test_gate_marker_split_across_deltas_swallowed_whole():
+    gate = alarm_bridge.FirstLineGate()
+    line = '【闹钟】{"action":"create","time":"08:38","repeat":"once","label":"三分钟后"}'
+    pieces = ["【闹", "钟】{\"action\":\"cre", "ate\",\"time\":\"08:38\",\"repeat\":\"once\",\"label\":\"三分钟后\"}", "\n好的，定上了。"]
+    releases, markers = [], []
+    for piece in pieces:
+        release, marker = gate.feed(piece)
+        releases.append(release)
+        if marker is not None:
+            markers.append(marker)
+    assert markers == [line]  # 跨多个 delta 拆分到达，仍整行交出、只交一次
+    joined = "".join(releases)
+    assert joined == "好的，定上了。"  # 放行文本里不含标记的任何字符
+    assert "闹钟" not in joined and "action" not in joined
+
+
+def test_gate_marker_only_line_held_until_finish():
+    gate = alarm_bridge.FirstLineGate()
+    line = '【闹钟】{"action":"list"}'
+    release, marker = gate.feed(line)
+    assert (release, marker) == ("", None)  # 没换行，先扣住，不放行任何文本
+    release, marker = gate.finish()
+    assert marker == line and release == ""
+
+
+def test_gate_partial_prefix_released_on_finish():
+    gate = alarm_bridge.FirstLineGate()
+    assert gate.feed("【闹") == ("", None)
+    release, marker = gate.finish()
+    assert marker is None and release == "【闹"  # 残缺前缀不是标记，流结束原样放行
+
+
+def test_gate_overlong_first_line_released_as_text():
+    gate = alarm_bridge.FirstLineGate()
+    text = "【闹钟】" + "长" * 400  # 以标记开头但整行迟迟不结束、超过缓冲上限
+    release, marker = gate.feed(text)
+    assert marker is None and release == text and gate.decided
+
+
+async def test_gate_marker_line_dispatches_execute_once(monkeypatch):
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    gate = alarm_bridge.FirstLineGate()
+    _, marker = gate.feed('【闹钟】{"action":"create","time":"07:30"}\n好的。')
+    assert marker is not None
+    assert alarm_bridge.handle_marker_line("dev-1", marker, source="增量") is True
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "create", "time": "07:30"})]
+    assert alarm_bridge.handle_marker_line("dev-1", "好的。") is False  # 非标记行不处理
+    await asyncio.sleep(0)
+    assert len(scheduled) == 1
+
+
+# ---------- 增量命中时，最终文本里被改了模样的标记行也要剥 ----------
+
+def test_strip_marker_from_final_variants():
+    line = '【闹钟】{"action":"list"}'
+    # 最终文本原样保留标记行 → 剥
+    assert alarm_bridge.strip_marker_from_final(line + "\n你没有闹钟。", line) == "你没有闹钟。"
+    # 最终文本丢掉前缀、只剩 JSON → 剥
+    assert alarm_bridge.strip_marker_from_final('{"action":"list"}\n你没有闹钟。', line) == "你没有闹钟。"
+    # 最终文本已把整行丢掉、正文就是首行 → 不动
+    assert alarm_bridge.strip_marker_from_final("你没有闹钟。", line) == "你没有闹钟。"
+
+
+async def test_process_first_text_streamed_hit_strips_bare_json_line(monkeypatch):
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    # 2026-11-19 08:35 实测形态：最终文本把标记前缀丢了、只剩 JSON 一行，增量里完整
+    final = '{"action":"create","time":"08:38","repeat":"once","label":"三分钟后"}\n好的，三分钟后的闹钟定上了。'
+    streamed = '【闹钟】{"action":"create","time":"08:38","repeat":"once","label":"三分钟后"}\n好的，三分钟后的闹钟定上了。'
+    text, consumed = alarm_bridge.process_first_text("dev-1", final, streamed)
+    assert consumed is True
+    assert text == "好的，三分钟后的闹钟定上了。"  # JSON 行被剥掉，不进 TTS 和对话
+    await asyncio.sleep(0)
+    assert len(scheduled) == 1

@@ -559,6 +559,10 @@ class MuseSession(AgentSession):
             # 只输出确认完成的回复，避免 Muse 最终修订文字被朗读两次。
             emitted = set()
             marker_checked = False  # 闹钟桥只看回合回复的第一段文本（见 alarm_bridge）
+            gate = None             # 首行前缀门：首段文本下发前先判定是不是闹钟标记
+            gate_src = ""           # 已喂给门的来源文本（首个回复的增量，缺失时用最终文本）
+            gate_fed = 0            # gate_src 已喂长度
+            gate_finish = False     # 回合已结束但门未决：下一轮用 finish() 收尾判定
             while not self._interrupt.is_set():
                 if pump.done():
                     await pump
@@ -569,26 +573,54 @@ class MuseSession(AgentSession):
                     pass
                 for reply in turn.replies.values():
                     if isinstance(reply, Reply) and reply.bound and reply.done and reply.text and reply.message_id not in emitted:
+                        text = reply.text
+                        if not marker_checked:
+                            # 闹钟桥：首段文本先过首行前缀门（alarm_bridge.FirstLineGate）。
+                            # 普通回复第一个字就与标记分叉、立即放行；确认是标记则整行
+                            # 吞掉执行，下发文本里对应的那行一并剥掉。门未决（标记行被
+                            # 拆成独立消息、还没到齐）时这个回复先扣住，后面的回复也
+                            # 不许越过它下发——标记绝不进 TTS 和对话记录。
+                            from core.agent import alarm_bridge
+
+                            if gate is None:
+                                gate = alarm_bridge.FirstLineGate()
+                                # 已完成的回复整条就是完整的：末尾补一个虚拟换行，
+                                # 让门按「行已结束」判定（消息边界即行边界）。
+                                gate_src = (reply.streamed or reply.text) + "\n"
+                            if gate_finish:
+                                _, marker_line = gate.finish()
+                            else:
+                                _, marker_line = gate.feed(gate_src[gate_fed:])
+                                gate_fed = len(gate_src)
+                            if not gate.decided:
+                                break
+                            marker_checked = True
+                            if marker_line is not None:
+                                # 门确认首行是标记：安排执行，最终文本里对应的行剥掉
+                                alarm_bridge.handle_marker_line(
+                                    self.device_key, marker_line, source="增量")
+                                text = alarm_bridge.strip_marker_from_final(text, marker_line)
+                            else:
+                                # 门判普通：既有双来源剥除再兜底一道（最终文本有标记、
+                                # 增量没有等反向情形靠它）；与门的执行二选一，不重复。
+                                text, _consumed = alarm_bridge.process_first_text(
+                                    self.device_key, text, reply.streamed)
+                            if not text.strip():
+                                emitted.add(reply.message_id)
+                                claim = getattr(self.bridge, "claim", None)
+                                if claim is not None:
+                                    claim(self._id, reply.message_id)  # 这条已念给设备，常驻订阅不要重复汇报
+                                continue
                         emitted.add(reply.message_id)
                         claim = getattr(self.bridge, "claim", None)
                         if claim is not None:
                             claim(self._id, reply.message_id)  # 这条已念给设备，常驻订阅不要重复汇报
-                        text = reply.text
-                        if not marker_checked:
-                            marker_checked = True
-                            # 闹钟桥：回复第一行若是【闹钟】标记，在文本离开这里之前
-                            # 剥掉并安排执行——下游（provider→connection）只会看到剥后
-                            # 的文本，标记绝不进 TTS 和对话记录。整条回复只有标记行
-                            # 时不产生空 TextDelta。
-                            from core.agent import alarm_bridge
-
-                            # 最终文本（display_text）可能丢开头的标记行，增量累积
-                            # （reply.streamed）里却完整，桥两个来源都查（见 alarm_bridge）。
-                            text, consumed = alarm_bridge.process_first_text(
-                                self.device_key, text, reply.streamed)
-                            if consumed and not text.strip():
-                                continue
                         yield TextDelta(text + "\n")
+                if gate is not None and not gate.decided:
+                    # 首行还被门扣着：回合已结束就安排收尾判定，未结束继续等增量
+                    if turn.complete(time.monotonic()):
+                        gate_finish = True
+                    continue
                 if turn.complete(time.monotonic()) and (emitted or turn.task_finished):
                     if not emitted:
                         raise ValueError("Muse returned no correlated reply")
