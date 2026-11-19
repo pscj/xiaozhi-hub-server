@@ -35,6 +35,7 @@ class Report:
     bot_id: str
     text: str
     at: float = field(default_factory=time.time)
+    record: bool = True  # False = 只念不记：不写进对话/聊天记录，设备端也不上屏（闹钟桥结果用）
 
 
 _lock = threading.Lock()
@@ -52,13 +53,15 @@ def _prune(items: List[Report]) -> List[Report]:
     return [r for r in items if now - r.at < EXPIRE_SECONDS][-MAX_PER_DEVICE:]
 
 
-def add(key: str, bot_id: str, text: str) -> None:
-    """放一条待汇报，设备在线就安排念。可以从任何线程调用。"""
+def add(key: str, bot_id: str, text: str, record: bool = True) -> None:
+    """放一条待汇报，设备在线就安排念。可以从任何线程调用。
+
+    record=False 的条目只念不记（见 Report.record），投递时单独成段发声。"""
     text = (text or "").strip()
     if not text:
         return
     with _lock:
-        _box[key] = _prune(_box.get(key, [])) + [Report(bot_id, text)]
+        _box[key] = _prune(_box.get(key, [])) + [Report(bot_id, text, record=record)]
     logger.bind(tag=TAG).info(f"设备 {key} 新增待汇报：{text[:60]}")
     _try_deliver(key)
 
@@ -172,7 +175,16 @@ async def deliver_when_idle(conn, initial_delay: float = 0, timeout: float = DEL
                 if not picked:
                     return False
                 try:
-                    speak(conn, "".join(r.text for r in picked))
+                    # 相邻且 record 一致的合并成一段念；只念不记的段落单独发声，
+                    # 免得和要入对话的待汇报混进同一句。
+                    segments = []
+                    for r in picked:
+                        if segments and segments[-1][1] == r.record:
+                            segments[-1][0] += r.text
+                        else:
+                            segments.append([r.text, r.record])
+                    for seg_text, seg_record in segments:
+                        speak(conn, seg_text, record=seg_record)
                 except Exception as e:  # noqa: BLE001 —— 没念成就放回去，留到下次
                     logger.bind(tag=TAG).warning(f"播报待汇报失败，放回去：{e!r}")
                     with _lock:
@@ -187,15 +199,49 @@ async def deliver_when_idle(conn, initial_delay: float = 0, timeout: float = DEL
             _delivering.discard(key)
 
 
-def speak(conn, text: str) -> None:
-    """服务端主动说一句（和呼名回复"我在"走同一条路）。"""
-    from core.handle.intentHandler import speak_txt
+def speak(conn, text: str, record: bool = True) -> None:
+    """服务端主动说一句（和呼名回复"我在"走同一条路）。
 
+    record=False 时只念不记：不经 speak_txt（它会把文本写进对话），改走
+    clear_command 同款的只发声队列；同时把这一句的 sentence_id 登记到
+    conn.announce_sentence_ids，TTS 下发时据此给句子打 announce 标记，
+    设备端收到后只出声、不上屏、不进本地聊天记录。"""
     conn.client_abort = False
     conn.sentence_id = str(uuid.uuid4().hex)
     conn.client_is_speaking = True  # 和一轮对话一样：播完 TTS 会清掉；期间再来的待汇报等着，不会截断这条
     conn.logger.bind(tag=TAG).info(f"播报待汇报：{text[:80]}")
-    speak_txt(conn, text)
+    if record:
+        from core.handle.intentHandler import speak_txt
+
+        speak_txt(conn, text)
+        return
+    ids = getattr(conn, "announce_sentence_ids", None)
+    if ids is None:
+        ids = conn.announce_sentence_ids = set()
+    ids.add(conn.sentence_id)
+    _speak_only(conn, text)
+
+
+def _speak_only(conn, text: str) -> None:
+    """只发声不写对话：与 clear_command._speak 同款队列法，唯独不 put 进 dialogue。"""
+    from core.providers.tts.dto.dto import ContentType, SentenceType, TTSMessageDTO
+
+    conn.tts.store_tts_text(conn.sentence_id, text)
+    conn.tts.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id=conn.sentence_id,
+            sentence_type=SentenceType.FIRST,
+            content_type=ContentType.ACTION,
+        )
+    )
+    conn.tts.tts_one_sentence(conn, ContentType.TEXT, content_detail=text)
+    conn.tts.tts_text_queue.put(
+        TTSMessageDTO(
+            sentence_id=conn.sentence_id,
+            sentence_type=SentenceType.LAST,
+            content_type=ContentType.ACTION,
+        )
+    )
 
 
 def on_conn_open(conn) -> None:

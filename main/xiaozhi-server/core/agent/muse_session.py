@@ -582,7 +582,10 @@ class MuseSession(AgentSession):
                             # 时不产生空 TextDelta。
                             from core.agent import alarm_bridge
 
-                            text, consumed = alarm_bridge.process_first_text(self.device_key, text)
+                            # 最终文本（display_text）可能丢开头的标记行，增量累积
+                            # （reply.streamed）里却完整，桥两个来源都查（见 alarm_bridge）。
+                            text, consumed = alarm_bridge.process_first_text(
+                                self.device_key, text, reply.streamed)
                             if consumed and not text.strip():
                                 continue
                         yield TextDelta(text + "\n")

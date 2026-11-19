@@ -35,6 +35,11 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
         conn.tts.tts_audio_first_sentence = False
 
+    # 只念不记的播报句（reports 登记过 sentence_id）：下发时带 announce 标记
+    announce = sentence_id is not None and sentence_id in (
+        getattr(conn, "announce_sentence_ids", None) or ()
+    )
+
     if sentenceType == SentenceType.FIRST:
         # 同一句子的后续消息加入流控队列，其他情况立即发送
         if (
@@ -44,11 +49,11 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
             == conn.sentence_id
         ):
             conn.audio_rate_controller.add_message(
-                lambda: send_tts_message(conn, "sentence_start", text)
+                lambda: send_tts_message(conn, "sentence_start", text, announce=announce)
             )
         else:
             # 新句子或流控器未初始化，立即发送
-            await send_tts_message(conn, "sentence_start", text)
+            await send_tts_message(conn, "sentence_start", text, announce=announce)
 
     reply_echo.note_reply(conn, text)  # [xiaozhi-hub] 记下回复内容，回复期间识别出的回声据此丢掉
     # [xiaozhi-hub] 每句从这轮第几毫秒开始播
@@ -307,8 +312,9 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     )
 
 
-async def send_tts_message(conn: "ConnectionHandler", state, text=None):
-    """发送 TTS 状态消息"""
+async def send_tts_message(conn: "ConnectionHandler", state, text=None, announce=False):
+    """发送 TTS 状态消息。announce=True 的 sentence_start 带 announce 标记：
+    只念不记的播报（如闹钟桥结果），设备端据此不上屏、不进聊天记录。"""
     if text is None and state == "sentence_start":
         return
     if state in ("start", "sentence_start"):
@@ -316,11 +322,16 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
         message["text"] = textUtils.check_emoji(text)
+    if announce and state == "sentence_start":
+        message["announce"] = True
 
     # TTS播放结束
     if state == "stop":
         # 保存当前的 sentence_id，用于后续判断是否是当前轮次
         current_sentence_id = conn.sentence_id
+        announce_ids = getattr(conn, "announce_sentence_ids", None)
+        if announce_ids:
+            announce_ids.discard(current_sentence_id)
         # 播放提示音
         tts_notify = conn.config.get("enable_stop_tts_notify", False)
         if tts_notify:

@@ -157,7 +157,7 @@ class FakeConn:
 @pytest.fixture
 def announced(monkeypatch):
     out = []
-    monkeypatch.setattr(reports, "add", lambda key, bot_id, text: out.append((key, bot_id, text)))
+    monkeypatch.setattr(reports, "add", lambda key, bot_id, text, record=True: out.append((key, bot_id, text)))
     return out
 
 
@@ -243,3 +243,139 @@ async def test_process_first_text_bad_marker_announces_failure(monkeypatch, anno
     text, consumed = alarm_bridge.process_first_text("dev-1", "【闹钟】{坏的}\n好的。")
     assert consumed is True and text == "好的。"
     assert len(announced) == 1 and announced[0][2].startswith("闹钟没设成：")
+
+
+# ---------- 双来源查标记（最终文本会丢开头标记，增量里找补） ----------
+
+async def test_process_first_text_marker_only_in_streamed(monkeypatch):
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    final = "好的，五分钟后叫你。"
+    streamed = '【闹钟】{"action":"create","time":"08:04","repeat":"once","label":"五分钟后"}\n好的，五分钟后叫你。'
+    text, consumed = alarm_bridge.process_first_text("dev-1", final, streamed)
+    assert consumed is True and text == final  # 最终文本不含标记行，原样下发
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "create", "time": "08:04", "repeat": "once", "label": "五分钟后"})]
+
+
+async def test_process_first_text_marker_only_in_final(monkeypatch):
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    final = '【闹钟】{"action":"list"}\n你现在没有闹钟。'
+    text, consumed = alarm_bridge.process_first_text("dev-1", final, "你现在没有闹钟。")
+    assert consumed is True and text == "你现在没有闹钟。"
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "list"})]
+
+
+async def test_process_first_text_marker_in_both_sources_executes_once(monkeypatch):
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    body = '【闹钟】{"action":"create","time":"07:30"}\n好的，记下了。'
+    text, consumed = alarm_bridge.process_first_text("dev-1", body, body)
+    assert consumed is True and text == "好的，记下了。"
+    await asyncio.sleep(0)
+    assert len(scheduled) == 1  # 两个来源都有标记也只执行一次
+
+
+async def test_process_first_text_bad_marker_only_in_streamed(monkeypatch, announced):
+    text, consumed = alarm_bridge.process_first_text("dev-1", "好的。", "【闹钟】{坏的}\n好的。")
+    assert consumed is True and text == "好的。"
+    assert len(announced) == 1 and announced[0][2].startswith("闹钟没设成：")
+
+
+async def test_process_first_text_no_marker_in_either_source(monkeypatch):
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append(spec)
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    text, consumed = alarm_bridge.process_first_text("dev-1", "今天天气不错。", "今天天气不错。")
+    assert (text, consumed) == ("今天天气不错。", False)
+    await asyncio.sleep(0)
+    assert scheduled == []
+
+
+# ---------- 结果投递：只念不记 ----------
+
+def test_announce_adds_report_without_record(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        reports, "add",
+        lambda key, bot_id, text, record=True: seen.append((key, bot_id, text, record)))
+    alarm_bridge.announce("dev-1", "闹钟已设好。")
+    assert seen == [("dev-1", "alarm", "闹钟已设好。", False)]
+
+
+class FakeTTS:
+    def __init__(self):
+        import queue
+
+        self.calls = []
+        self.tts_text_queue = queue.Queue()
+
+    def store_tts_text(self, sentence_id, text):
+        self.calls.append(("store", text))
+
+    def tts_one_sentence(self, conn, content_type, content_detail=None):
+        self.calls.append(("sentence", content_detail))
+
+
+class SpeakConn:
+    def __init__(self):
+        from types import SimpleNamespace
+
+        self.session_id, self.device_id = "s-1", "dev-1"
+        self.client_is_speaking, self.client_have_voice = False, False
+        self.tts = FakeTTS()
+        self.loop = None  # add() 时不自动安排投递，测试里直接调 deliver_when_idle
+        self.client_abort, self.sentence_id = True, None
+        self.logger = SimpleNamespace(
+            bind=lambda **k: SimpleNamespace(info=lambda *a: None, warning=lambda *a: None))
+
+
+def test_reports_speak_record_false_never_reaches_speak_txt(monkeypatch):
+    import core.handle.intentHandler as intent_mod
+
+    recorded = []
+    monkeypatch.setattr(intent_mod, "speak_txt", lambda conn, text: recorded.append(text))
+    conn = SpeakConn()
+    reports.speak(conn, "闹钟已设好。", record=False)
+    assert recorded == []  # 没走会把文本写进对话的 speak_txt
+    assert ("sentence", "闹钟已设好。") in conn.tts.calls  # 文本只进了 TTS 队列
+    assert conn.sentence_id in conn.announce_sentence_ids  # 句已登记，下发时打 announce 标记
+    reports.speak(conn, "普通播报。")
+    assert recorded == ["普通播报。"]  # 默认路径不变：照常走 speak_txt 入对话
+
+
+async def test_deliver_mixed_segments_only_recorded_goes_to_speak_txt(monkeypatch):
+    from core.admin import connections
+    import core.handle.intentHandler as intent_mod
+
+    recorded = []
+    monkeypatch.setattr(intent_mod, "speak_txt", lambda conn, text: recorded.append(text))
+    conn = SpeakConn()
+    reports.clear()
+    connections.register(conn)
+    try:
+        reports.add("dev-1", "grok", "普通待汇报。")
+        reports.add("dev-1", "alarm", "闹钟已设好。", record=False)
+        assert await reports.deliver_when_idle(conn) is True
+    finally:
+        connections.unregister(conn)
+        reports.clear()
+    assert recorded == ["普通待汇报。"]  # 只念不记的那段没进对话路径
+    assert ("sentence", "闹钟已设好。") in conn.tts.calls

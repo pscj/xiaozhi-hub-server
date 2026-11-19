@@ -291,13 +291,16 @@ def _exception_reason(exc):
 # ---------- 执行：找连接 → 调工具 → 补播报 ----------
 
 def announce(device_key, text):
-    """把一句结果放进待汇报箱（可从任何线程/循环调用，失败只记日志）。"""
+    """把一句结果放进待汇报箱（可从任何线程/循环调用，失败只记日志）。
+
+    桥的结果只念不记：record=False 投递——不写进设备对话、聊天记录里不留，
+    设备端也不上屏（见 reports.speak 的只念不记发声）。"""
     if not device_key or not text:
         return
     try:
         from core.agent import reports
 
-        reports.add(device_key, BOT_ID, text)
+        reports.add(device_key, BOT_ID, text, record=False)
     except Exception:
         logger.bind(tag=TAG).warning(f"闹钟结果放入待汇报箱失败，设备={device_key}")
 
@@ -352,20 +355,34 @@ async def _execute_inner(device_key, spec):
 
 # ---------- 回合入口：MuseSession.send() 发射第一段回复文本时调用 ----------
 
-def process_first_text(device_key, text):
+def process_first_text(device_key, text, streamed=None):
     """处理回合回复的第一段文本。返回 (要继续往下发的文本, 是否命中了标记)。
 
-    没标记时原样返回、零副作用；命中时标记行已被剥掉，执行异步安排，
-    解析失败则安排一句失败补播报——两种情况都不会让回合崩溃。
+    两个来源都查标记（与常驻监听 watcher 同款做法）：最终文本（reply.text，
+    即 display_text/transcript）会丢开头的标记行、增量累积（reply.streamed）
+    里却完整（反之亦可能）。最终文本命中时以它为准（剥掉标记行再往下发）；
+    最终文本没有、增量里有时，判定与执行参数取增量的，下发文本仍用最终
+    文本——它本来就不含标记行，无需剥除。两边都有也只执行一次。
+
+    没标记时原样返回、零副作用；解析失败则安排一句失败补播报——任何情况
+    都不会让回合崩溃。
     """
     stripped, spec, error = extract(text)
+    source = "最终文本"
+    if spec is None and error is None and streamed:
+        alt_stripped, alt_spec, alt_error = extract(streamed)
+        if alt_spec is not None or alt_error is not None:
+            spec, error = alt_spec, alt_error
+            source = "增量"
+            stripped = text  # 最终文本里没有标记行可剥，原样下发
     if spec is None and error is None:
         return text, False
     if error is not None:
-        logger.bind(tag=TAG).warning(f"闹钟标记解析失败：{error}，设备={device_key}")
+        logger.bind(tag=TAG).warning(f"闹钟标记解析失败：{error}，来源={source}，设备={device_key}")
         announce(device_key, failure_text(None, error))
         return stripped, True
-    logger.bind(tag=TAG).info(f"闹钟标记命中：action={spec.get('action')}，设备={device_key}")
+    logger.bind(tag=TAG).info(
+        f"闹钟标记命中：来源={source}，action={spec.get('action')}，设备={device_key}")
     if device_key:
         try:
             asyncio.ensure_future(execute(device_key, spec))
