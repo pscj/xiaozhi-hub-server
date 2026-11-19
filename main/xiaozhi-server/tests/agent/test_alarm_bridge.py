@@ -503,3 +503,311 @@ async def test_process_first_text_streamed_hit_strips_bare_json_line(monkeypatch
     assert text == "好的，三分钟后的闹钟定上了。"  # JSON 行被剥掉，不进 TTS 和对话
     await asyncio.sleep(0)
     assert len(scheduled) == 1
+
+
+# ---------- 倒计时域：标记提取与参数 ----------
+
+def test_timer_extract_create():
+    text = '【倒计时】{"action":"create","duration_sec":600,"label":"煮面"}\n好的，开始计时。'
+    stripped, spec, error = alarm_bridge.extract_timer(text)
+    assert error is None
+    assert spec == {"action": "create", "duration_sec": 600, "label": "煮面"}
+    assert stripped == "好的，开始计时。"
+
+
+def test_timer_extract_duration_string_coerced():
+    _, spec, error = alarm_bridge.extract_timer('【倒计时】{"action":"create","duration_sec":"900"}')
+    assert error is None and spec["duration_sec"] == 900
+
+
+def test_timer_extract_missing_and_bad_duration():
+    _, spec, error = alarm_bridge.extract_timer('【倒计时】{"action":"create"}')
+    assert spec is None and error == "缺少时长"
+    _, spec, error = alarm_bridge.extract_timer('【倒计时】{"action":"create","duration_sec":0}')
+    assert spec is None and error and "24小时" in error
+    _, spec, error = alarm_bridge.extract_timer('【倒计时】{"action":"create","duration_sec":"十分钟"}')
+    assert spec is None and error and "总秒数" in error
+
+
+def test_timer_extract_cancel_without_id_ok():
+    # 与闹钟域不同：cancel/pause/resume 的 id 可省略，桥执行前查列表锁定
+    _, spec, error = alarm_bridge.extract_timer('【倒计时】{"action":"cancel"}')
+    assert error is None and spec == {"action": "cancel"}
+
+
+def test_timer_extract_unknown_action():
+    _, spec, error = alarm_bridge.extract_timer('【倒计时】{"action":"explode"}')
+    assert spec is None and error and "explode" in error
+
+
+def test_timer_action_tool_mapping_and_args():
+    assert alarm_bridge.TIMER_ACTION_TOOLS == {
+        "create": "self.timer.create",
+        "list": "self.timer.list",
+        "cancel": "self.timer.cancel",
+        "pause": "self.timer.pause",
+        "resume": "self.timer.resume",
+    }
+    assert alarm_bridge.build_timer_args({"action": "create", "duration_sec": 600, "label": "煮面"}) == {
+        "duration_sec": 600, "label": "煮面"}
+    assert alarm_bridge.build_timer_args({"action": "cancel", "id": "t1"}) == {"id": "t1"}
+    assert alarm_bridge.build_timer_args({"action": "list"}) == {}
+
+
+# ---------- 倒计时域：文案 ----------
+
+def test_duration_text():
+    assert alarm_bridge.duration_text(45) == "45秒"
+    assert alarm_bridge.duration_text(60) == "1分钟"
+    assert alarm_bridge.duration_text(600) == "10分钟"
+    assert alarm_bridge.duration_text(570) == "9分30秒"
+    assert alarm_bridge.duration_text(3600) == "1小时"
+    assert alarm_bridge.duration_text(3660) == "1小时1分"
+
+
+def test_timer_success_text_create():
+    spec = {"action": "create", "duration_sec": 600, "label": "煮面"}
+    data = {"success": True, "id": "t1", "duration_sec": 600, "label": "煮面",
+            "ends_at_local": "2026-11-19T15:42:00"}
+    assert alarm_bridge.timer_success_text(spec, data, now=NOW) == "倒计时已设好，煮面，10分钟，3点42分到点。"
+
+
+def test_timer_success_text_list():
+    data = {"success": True, "timers": [
+        {"id": "t1", "label": "煮面", "state": "running", "remaining_sec": 570},
+        {"id": "t2", "label": "泡茶", "state": "paused", "remaining_sec": 180},
+    ]}
+    assert alarm_bridge.timer_success_text({"action": "list"}, data) == (
+        "你一共有2个倒计时：煮面，还剩9分30秒；泡茶，已暂停，还剩3分钟。")
+    assert alarm_bridge.timer_success_text({"action": "list"}, {"success": True, "timers": []}) == "你现在没有倒计时。"
+
+
+def test_timer_success_text_cancel_pause_resume():
+    assert alarm_bridge.timer_success_text(
+        {"action": "cancel", "_label": "煮面"}, {"success": True}) == "已经取消了煮面的倒计时。"
+    assert alarm_bridge.timer_success_text(
+        {"action": "cancel"}, {"success": True}) == "倒计时已经取消了。"
+    assert alarm_bridge.timer_success_text(
+        {"action": "pause"}, {"success": True, "remaining_sec": 570}) == "倒计时已暂停，还剩9分30秒。"
+    ends_at = NOW.timestamp() * 1000 + 570_000
+    assert alarm_bridge.timer_success_text(
+        {"action": "resume"}, {"success": True, "ends_at": ends_at}, now=NOW) == "倒计时继续，9分30秒后到点。"
+
+
+def test_timer_failure_text_prefix_per_action():
+    assert alarm_bridge.timer_failure_text({"action": "create"}, "时长不对") == "倒计时没设成：时长不对。"
+    assert alarm_bridge.timer_failure_text({"action": "pause"}, "没有正在跑的") == "倒计时没暂停成：没有正在跑的。"
+    assert alarm_bridge.timer_failure_text(None, "格式不对") == "倒计时没设成：格式不对。"
+
+
+# ---------- 倒计时域：执行（mock 工具调用与待汇报箱） ----------
+
+async def test_timer_execute_create(monkeypatch, announced):
+    conn = FakeConn(asyncio.get_running_loop())
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: conn)
+    calls = []
+
+    async def fake_call(conn_, client, tool_name, args, timeout=30):
+        calls.append((tool_name, json.loads(args)))
+        return json.dumps({"success": True, "id": "t1", "duration_sec": 600, "label": "煮面",
+                           "ends_at_local": "2026-11-19T15:42:00"})
+
+    monkeypatch.setattr(mcp_handler, "call_mcp_tool", fake_call)
+    await alarm_bridge.execute_timer("dev-1", {"action": "create", "duration_sec": 600, "label": "煮面"})
+    assert calls == [("self_timer_create", {"duration_sec": 600, "label": "煮面"})]
+    assert announced == [("dev-1", "timer", "倒计时已设好，煮面，10分钟，3点42分到点。")]
+
+
+async def test_timer_execute_cancel_resolves_single_active(monkeypatch, announced):
+    conn = FakeConn(asyncio.get_running_loop())
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: conn)
+    calls = []
+
+    async def fake_call(conn_, client, tool_name, args, timeout=30):
+        calls.append(tool_name)
+        if tool_name == "self_timer_list":
+            return json.dumps({"success": True, "timers": [
+                {"id": "t1", "label": "煮面", "state": "running", "remaining_sec": 300}]})
+        return json.dumps({"success": True})
+
+    monkeypatch.setattr(mcp_handler, "call_mcp_tool", fake_call)
+    await alarm_bridge.execute_timer("dev-1", {"action": "cancel"})
+    assert calls == ["self_timer_list", "self_timer_cancel"]  # 无 id 先查列表锁定唯一一条
+    assert announced == [("dev-1", "timer", "已经取消了煮面的倒计时。")]
+
+
+async def test_timer_execute_cancel_ambiguous_announces_failure(monkeypatch, announced):
+    conn = FakeConn(asyncio.get_running_loop())
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: conn)
+    calls = []
+
+    async def fake_call(conn_, client, tool_name, args, timeout=30):
+        calls.append(tool_name)
+        return json.dumps({"success": True, "timers": [
+            {"id": "t1", "label": "煮面", "state": "running", "remaining_sec": 300},
+            {"id": "t2", "label": "泡茶", "state": "running", "remaining_sec": 120}]})
+
+    monkeypatch.setattr(mcp_handler, "call_mcp_tool", fake_call)
+    await alarm_bridge.execute_timer("dev-1", {"action": "cancel"})
+    assert calls == ["self_timer_list"]  # 定不下来就不许乱取消
+    assert len(announced) == 1
+    key, bot_id, text = announced[0]
+    assert (key, bot_id) == ("dev-1", "timer")
+    assert text.startswith("倒计时没取消成：") and "2个" in text
+
+
+async def test_timer_execute_pause_resolves_by_label(monkeypatch, announced):
+    conn = FakeConn(asyncio.get_running_loop())
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: conn)
+    calls = []
+
+    async def fake_call(conn_, client, tool_name, args, timeout=30):
+        calls.append((tool_name, json.loads(args)))
+        if tool_name == "self_timer_list":
+            return json.dumps({"success": True, "timers": [
+                {"id": "t1", "label": "煮面", "state": "running", "remaining_sec": 300},
+                {"id": "t2", "label": "泡茶", "state": "running", "remaining_sec": 120}]})
+        return json.dumps({"success": True, "remaining_sec": 118})
+
+    monkeypatch.setattr(mcp_handler, "call_mcp_tool", fake_call)
+    await alarm_bridge.execute_timer("dev-1", {"action": "pause", "label": "泡茶"})
+    assert calls[-1] == ("self_timer_pause", {"id": "t2"})
+    assert announced == [("dev-1", "timer", "倒计时已暂停，还剩1分58秒。")]
+
+
+async def test_timer_execute_device_offline(monkeypatch, announced):
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: None)
+    await alarm_bridge.execute_timer("dev-1", {"action": "create", "duration_sec": 60})
+    assert announced == [("dev-1", "timer", "倒计时没设成：设备不在线。")]
+
+
+async def test_timer_execute_tool_missing(monkeypatch, announced):
+    conn = FakeConn(asyncio.get_running_loop())
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: conn)
+
+    async def fake_call(conn_, client, tool_name, args, timeout=30):
+        raise ValueError(f"工具 {tool_name} 不存在")
+
+    monkeypatch.setattr(mcp_handler, "call_mcp_tool", fake_call)
+    await alarm_bridge.execute_timer("dev-1", {"action": "list"})
+    assert announced == [("dev-1", "timer", "倒计时列表没查成：设备上还没有倒计时功能。")]
+
+
+# ---------- 倒计时域：回合入口与双来源 ----------
+
+async def test_process_first_text_timer_marker_in_final(monkeypatch):
+    scheduled = []
+
+    async def fake_execute_timer(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute_timer", fake_execute_timer)
+    text, consumed = alarm_bridge.process_first_text(
+        "dev-1", '【倒计时】{"action":"create","duration_sec":600,"label":"煮面"}\n好的，开始计时。')
+    assert consumed is True and text == "好的，开始计时。"
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "create", "duration_sec": 600, "label": "煮面"})]
+
+
+async def test_process_first_text_timer_marker_only_in_streamed(monkeypatch):
+    scheduled = []
+
+    async def fake_execute_timer(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute_timer", fake_execute_timer)
+    final = "好的，十分钟后叫你。"
+    streamed = '【倒计时】{"action":"create","duration_sec":600}\n好的，十分钟后叫你。'
+    text, consumed = alarm_bridge.process_first_text("dev-1", final, streamed)
+    assert consumed is True and text == final  # 最终文本不含标记行，原样下发
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "create", "duration_sec": 600})]
+
+
+async def test_process_first_text_timer_streamed_hit_strips_bare_json(monkeypatch):
+    scheduled = []
+
+    async def fake_execute_timer(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute_timer", fake_execute_timer)
+    # 与闹钟 08:35 同形态：最终文本丢了【倒计时】前缀、只剩 JSON 一行
+    final = '{"action":"create","duration_sec":600}\n好的，开始计时。'
+    streamed = '【倒计时】{"action":"create","duration_sec":600}\n好的，开始计时。'
+    text, consumed = alarm_bridge.process_first_text("dev-1", final, streamed)
+    assert consumed is True and text == "好的，开始计时。"
+    await asyncio.sleep(0)
+    assert len(scheduled) == 1
+
+
+async def test_process_first_text_timer_bad_marker_announces_failure(monkeypatch, announced):
+    text, consumed = alarm_bridge.process_first_text("dev-1", "【倒计时】{坏的}\n好的。")
+    assert consumed is True and text == "好的。"
+    assert len(announced) == 1 and announced[0][1] == "timer"
+    assert announced[0][2].startswith("倒计时没设成：")
+
+
+async def test_handle_marker_line_timer_dispatches(monkeypatch):
+    scheduled = []
+
+    async def fake_execute_timer(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute_timer", fake_execute_timer)
+    assert alarm_bridge.handle_marker_line("dev-1", '【倒计时】{"action":"pause"}', source="增量") is True
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "pause"})]
+
+
+def test_strip_marker_from_final_timer_variants():
+    line = '【倒计时】{"action":"list"}'
+    assert alarm_bridge.strip_marker_from_final(line + "\n没有倒计时。", line) == "没有倒计时。"
+    assert alarm_bridge.strip_marker_from_final('{"action":"list"}\n没有倒计时。', line) == "没有倒计时。"
+    assert alarm_bridge.strip_marker_from_final("没有倒计时。", line) == "没有倒计时。"
+
+
+# ---------- 首行前缀门：双标记集合（两标记只共享首字「【」） ----------
+
+def test_gate_timer_prefix_waits_then_marker():
+    gate = alarm_bridge.FirstLineGate()
+    assert gate.feed("【倒") == ("", None) and not gate.decided  # 【倒计时】的真前缀，先攒
+    release, marker = gate.feed('计时】{"action":"list"}\n好的。')
+    assert marker == '【倒计时】{"action":"list"}'
+    assert release == "好的。"
+
+
+def test_gate_timer_marker_split_across_deltas():
+    gate = alarm_bridge.FirstLineGate()
+    line = '【倒计时】{"action":"create","duration_sec":600}'
+    releases, markers = [], []
+    for piece in ["【倒", "计时】{\"action\":\"cre", "ate\",\"duration_sec\":600}", "\n好的。"]:
+        release, marker = gate.feed(piece)
+        releases.append(release)
+        if marker is not None:
+            markers.append(marker)
+    assert markers == [line]  # 跨 delta 拆分仍整行交出、只交一次
+    assert "".join(releases) == "好的。"  # 放行文本不含标记任何字符
+
+
+def test_gate_timer_divergence_after_partial_prefix_releases():
+    gate = alarm_bridge.FirstLineGate()
+    assert gate.feed("【倒") == ("", None)
+    release, marker = gate.feed("计时器坏了。")
+    # 「【倒计时器」第五字与【倒计时】分叉（器 vs 】），与【闹钟】第二字就分叉：普通文本
+    assert marker is None and release == "【倒计时器坏了。" and gate.decided
+
+
+def test_gate_alarm_divergence_still_releases_with_marker_set():
+    gate = alarm_bridge.FirstLineGate()
+    assert gate.feed("【闹") == ("", None)
+    release, marker = gate.feed("钟声响了。")
+    # 「【闹钟声」第四字与【闹钟】分叉（声 vs 】）：普通文本原样放行，不被倒计时候选拖住
+    assert marker is None and release == "【闹钟声响了。" and gate.decided
+
+
+def test_gate_timer_marker_only_line_held_until_finish():
+    gate = alarm_bridge.FirstLineGate()
+    line = '【倒计时】{"action":"list"}'
+    assert gate.feed(line) == ("", None)  # 没换行先扣住
+    release, marker = gate.finish()
+    assert marker == line and release == ""
