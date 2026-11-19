@@ -811,3 +811,143 @@ def test_gate_timer_marker_only_line_held_until_finish():
     assert gate.feed(line) == ("", None)  # 没换行先扣住
     release, marker = gate.finish()
     assert marker == line and release == ""
+
+
+# ---------- 静默收尾：倒计时 create 成功不回复 ----------
+
+def _fake_timer_conn(monkeypatch, result_json):
+    conn = FakeConn(asyncio.get_running_loop())
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: conn)
+    calls = []
+
+    async def fake_call(conn_, client, tool_name, args, timeout=30):
+        calls.append((tool_name, json.loads(args)))
+        return result_json
+
+    monkeypatch.setattr(mcp_handler, "call_mcp_tool", fake_call)
+    return calls
+
+
+async def test_timer_create_silent_success_no_announce(monkeypatch, announced):
+    calls = _fake_timer_conn(monkeypatch, json.dumps(
+        {"success": True, "id": "t1", "duration_sec": 60, "ends_at_local": "2026-11-19T08:01:00"}))
+    ok = await alarm_bridge.execute_timer_create_silent(
+        "dev-1", {"action": "create", "duration_sec": 60})
+    assert ok is True
+    assert calls == [("self_timer_create", {"duration_sec": 60})]
+    assert announced == []  # 成功不播报任何文字
+
+
+async def test_timer_create_silent_failure_still_announces(monkeypatch, announced):
+    _fake_timer_conn(monkeypatch, json.dumps({"success": False, "error": "时长不对"}))
+    ok = await alarm_bridge.execute_timer_create_silent(
+        "dev-1", {"action": "create", "duration_sec": 60})
+    assert ok is False
+    assert announced == [("dev-1", "timer", "倒计时没设成：时长不对。")]  # 不能静默失败
+
+
+async def test_timer_create_silent_offline_announces_failure(monkeypatch, announced):
+    monkeypatch.setattr(alarm_bridge, "_find_conn", lambda key: None)
+    ok = await alarm_bridge.execute_timer_create_silent(
+        "dev-1", {"action": "create", "duration_sec": 60})
+    assert ok is False
+    assert announced == [("dev-1", "timer", "倒计时没设成：设备不在线。")]
+
+
+async def test_settle_first_text_timer_create_success_discards_rest(monkeypatch, announced):
+    _fake_timer_conn(monkeypatch, json.dumps(
+        {"success": True, "id": "t1", "duration_sec": 60, "ends_at_local": "2026-11-19T08:01:00"}))
+    text, consumed, silenced = await alarm_bridge.settle_first_text(
+        "dev-1", '【倒计时】{"action":"create","duration_sec":60}\n好，一分钟后提醒你。')
+    assert (text, consumed, silenced) == ("", True, True)  # 余文整段作废
+    assert announced == []
+
+
+async def test_settle_first_text_timer_create_failure_keeps_rest(monkeypatch, announced):
+    _fake_timer_conn(monkeypatch, json.dumps({"success": False, "error": "时长不对"}))
+    text, consumed, silenced = await alarm_bridge.settle_first_text(
+        "dev-1", '【倒计时】{"action":"create","duration_sec":60}\n好，一分钟后提醒你。')
+    assert (text, consumed, silenced) == ("好，一分钟后提醒你。", True, False)
+    assert announced == [("dev-1", "timer", "倒计时没设成：时长不对。")]
+
+
+async def test_settle_first_text_timer_create_only_in_streamed_silences(monkeypatch, announced):
+    _fake_timer_conn(monkeypatch, json.dumps(
+        {"success": True, "id": "t1", "duration_sec": 60, "ends_at_local": "2026-11-19T08:01:00"}))
+    final = "好，一分钟后提醒你。"
+    streamed = '【倒计时】{"action":"create","duration_sec":60}\n好，一分钟后提醒你。'
+    text, consumed, silenced = await alarm_bridge.settle_first_text("dev-1", final, streamed)
+    assert (text, consumed, silenced) == ("", True, True)
+    assert announced == []
+
+
+async def test_settle_first_text_alarm_create_not_silenced(monkeypatch, announced):
+    # 反例：闹钟 create 不走静默——照旧安排执行、余文照常下发
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    text, consumed, silenced = await alarm_bridge.settle_first_text(
+        "dev-1", '【闹钟】{"action":"create","time":"07:30"}\n好的，明早叫你。')
+    assert (text, consumed, silenced) == ("好的，明早叫你。", True, False)
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "create", "time": "07:30"})]
+
+
+async def test_settle_first_text_timer_list_not_silenced(monkeypatch):
+    # 倒计时的其他动作也不静默：照旧安排 execute_timer、余文照常
+    scheduled = []
+
+    async def fake_execute_timer(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute_timer", fake_execute_timer)
+    text, consumed, silenced = await alarm_bridge.settle_first_text(
+        "dev-1", '【倒计时】{"action":"list"}\n你现在没有倒计时。')
+    assert (text, consumed, silenced) == ("你现在没有倒计时。", True, False)
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "list"})]
+
+
+async def test_settle_first_text_timer_bad_marker_not_silenced(monkeypatch, announced):
+    # 非法倒计时标记走原失败路径：余文照常＋失败补播报，不进静默判定
+    text, consumed, silenced = await alarm_bridge.settle_first_text(
+        "dev-1", "【倒计时】{坏的}\n好的。")
+    assert (text, consumed, silenced) == ("好的。", True, False)
+    assert len(announced) == 1 and announced[0][2].startswith("倒计时没设成：")
+
+
+async def test_settle_marker_line_timer_create_success(monkeypatch, announced):
+    _fake_timer_conn(monkeypatch, json.dumps(
+        {"success": True, "id": "t1", "duration_sec": 60, "ends_at_local": "2026-11-19T08:01:00"}))
+    line = '【倒计时】{"action":"create","duration_sec":60}'
+    text, silenced = await alarm_bridge.settle_marker_line(
+        "dev-1", line, line + "\n好，一分钟后提醒你。", source="增量")
+    assert (text, silenced) == ("", True)
+    assert announced == []
+
+
+async def test_settle_marker_line_timer_create_failure(monkeypatch, announced):
+    _fake_timer_conn(monkeypatch, json.dumps({"success": False, "error": "时长不对"}))
+    line = '【倒计时】{"action":"create","duration_sec":60}'
+    text, silenced = await alarm_bridge.settle_marker_line(
+        "dev-1", line, line + "\n好，一分钟后提醒你。", source="增量")
+    assert (text, silenced) == ("好，一分钟后提醒你。", False)  # 失败：剥行后余文照常
+    assert announced == [("dev-1", "timer", "倒计时没设成：时长不对。")]
+
+
+async def test_settle_marker_line_alarm_create_not_silenced(monkeypatch):
+    scheduled = []
+
+    async def fake_execute(key, spec):
+        scheduled.append((key, spec))
+
+    monkeypatch.setattr(alarm_bridge, "execute", fake_execute)
+    line = '【闹钟】{"action":"create","time":"07:30"}'
+    text, silenced = await alarm_bridge.settle_marker_line(
+        "dev-1", line, line + "\n好的，明早叫你。", source="增量")
+    assert (text, silenced) == ("好的，明早叫你。", False)
+    await asyncio.sleep(0)
+    assert scheduled == [("dev-1", {"action": "create", "time": "07:30"})]

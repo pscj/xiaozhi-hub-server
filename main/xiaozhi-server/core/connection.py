@@ -45,6 +45,7 @@ from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
 from core.utils import reply_progress, textUtils, turn_gen
+from core.utils.silent_turn import tool_result_succeeded, turn_silent_after_tools
 from core.utils.tool_markup import ToolMarkupFilter, strip_tool_markup
 from core.agent import chat_history, llm_router
 
@@ -1095,6 +1096,10 @@ class ConnectionHandler:
             return self._chat(query, depth, sentence_id)
         finally:
             reply_progress.finish_turn(self, sentence_id)
+            # [xiaozhi-hub] 整轮工具台账（静默判定用）随轮清除
+            turns = getattr(self, "_tool_turns", None)
+            if turns is not None:
+                turns.pop(sentence_id, None)
             # [xiaozhi-hub] 这一轮写进 data/chat.db；截掉的旧对话攒够了就在后台总结成记忆
             chat_history.sync(self)
             chat_history.maybe_summarize(self)
@@ -1106,6 +1111,24 @@ class ConnectionHandler:
     def _superseded(self, sentence_id):
         """[xiaozhi-hub] 这一轮已被打断或已开始新的一轮：旧的一轮不能再往合成和对话里塞内容。"""
         return self.client_abort or self.sentence_id != sentence_id or turn_gen.stale(self, sentence_id=sentence_id)
+
+    def _note_tool_outcomes(self, sentence_id, tool_results):
+        """[xiaozhi-hub] 把这一层执行过的工具（名字、成败）记进整轮台账，返回台账。
+
+        跟进生成发生在最深一层，而「整轮只有倒计时 create 才静默」要看跨
+        depth 的全部工具（先 list 再 create 的轮次混着 list，不能静默），
+        所以按 sentence_id 累积；chat() 收尾时清除，这里再兜底防台账无限
+        增长。判定本身在 core.utils.silent_turn（纯逻辑）。
+        """
+        turns = getattr(self, "_tool_turns", None)
+        if turns is None:
+            turns = self._tool_turns = {}
+        outcomes = turns.setdefault(sentence_id, [])
+        for result, tool_call_data in tool_results:
+            outcomes.append((tool_call_data["name"], tool_result_succeeded(result)))
+        while len(turns) > 8:
+            turns.pop(next(iter(turns)))
+        return outcomes
 
     def _chat(self, query, depth=0, sentence_id=None):
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
@@ -1509,6 +1532,8 @@ class ConnectionHandler:
 
     def _handle_function_result(self, tool_results, depth, streamed_text="", sentence_id=None):
         sentence_id = sentence_id or self.sentence_id
+        # [xiaozhi-hub] 整轮工具台账：给最深一层的静默判定看跨 depth 的全部工具
+        outcomes = self._note_tool_outcomes(sentence_id, tool_results)
         need_llm_tools = []
         record_tools = []
 
@@ -1616,7 +1641,16 @@ class ConnectionHandler:
 
             # [xiaozhi-hub] 工具执行期间被打断：结果照样留在对话里，但不再为这一轮去问模型
             if not self._superseded(sentence_id):
-                self._chat(None, depth=depth + 1, sentence_id=sentence_id)
+                if turn_silent_after_tools(outcomes):
+                    # [xiaozhi-hub] 整轮只有倒计时 create 且全部成功（用户要求设好
+                    # 后不回复任何文字）：不再跟进问模型。工具链已写入对话，补一
+                    # 条助手收尾保持链完整即可——不送合成、不发句子，回合由 _chat
+                    # 外层照常收尾（depth 0 发 LAST），客户端状态机正常回聆听。
+                    self.logger.bind(tag=TAG).info(
+                        "本轮只有倒计时创建且全部成功，按要求静默收尾，不跟进生成回复")
+                    self._put_reply(sentence_id, "倒计时已开始计时。")
+                else:
+                    self._chat(None, depth=depth + 1, sentence_id=sentence_id)
 
     def _report_worker(self):
         """聊天记录上报工作线程"""

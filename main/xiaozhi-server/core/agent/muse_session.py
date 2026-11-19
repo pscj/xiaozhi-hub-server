@@ -559,6 +559,7 @@ class MuseSession(AgentSession):
             # 只输出确认完成的回复，避免 Muse 最终修订文字被朗读两次。
             emitted = set()
             marker_checked = False  # 闹钟桥只看回合回复的第一段文本（见 alarm_bridge）
+            silenced = False        # 倒计时 create 成功静默：本回合后续回复也只认领不下发
             gate = None             # 首行前缀门：首段文本下发前先判定是不是闹钟标记
             gate_src = ""           # 已喂给门的来源文本（首个回复的增量，缺失时用最终文本）
             gate_fed = 0            # gate_src 已喂长度
@@ -596,14 +597,15 @@ class MuseSession(AgentSession):
                                 break
                             marker_checked = True
                             if marker_line is not None:
-                                # 门确认首行是标记：安排执行，最终文本里对应的行剥掉
-                                alarm_bridge.handle_marker_line(
-                                    self.device_key, marker_line, source="增量")
-                                text = alarm_bridge.strip_marker_from_final(text, marker_line)
+                                # 门确认首行是标记：安排执行，最终文本里对应的行剥掉。
+                                # 倒计时 create 例外：settle 里同步等执行结果，成功就
+                                # 整回合静默（余文作废、不播报），见 alarm_bridge。
+                                text, silenced = await alarm_bridge.settle_marker_line(
+                                    self.device_key, marker_line, text, source="增量")
                             else:
                                 # 门判普通：既有双来源剥除再兜底一道（最终文本有标记、
                                 # 增量没有等反向情形靠它）；与门的执行二选一，不重复。
-                                text, _consumed = alarm_bridge.process_first_text(
+                                text, _consumed, silenced = await alarm_bridge.settle_first_text(
                                     self.device_key, text, reply.streamed)
                             if not text.strip():
                                 emitted.add(reply.message_id)
@@ -611,6 +613,14 @@ class MuseSession(AgentSession):
                                 if claim is not None:
                                     claim(self._id, reply.message_id)  # 这条已念给设备，常驻订阅不要重复汇报
                                 continue
+                        if silenced:
+                            # 本回合已被倒计时 create 静默：后续回复同样只认领、不下发，
+                            # 保证这一回合在设备侧完全没有文字
+                            emitted.add(reply.message_id)
+                            claim = getattr(self.bridge, "claim", None)
+                            if claim is not None:
+                                claim(self._id, reply.message_id)
+                            continue
                         emitted.add(reply.message_id)
                         claim = getattr(self.bridge, "claim", None)
                         if claim is not None:

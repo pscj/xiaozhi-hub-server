@@ -23,6 +23,12 @@
 回合不经过本桥。本模块按历史文件名保留 alarm_bridge，muse_session 的接法
 （FirstLineGate/handle_marker_line/strip_marker_from_final/process_first_text
 四个入口）不随域增加而变化。
+
+一个例外（用户要求）：倒计时 create 成功后不要任何回复文字——倒计时屏本身
+就是反馈。所以 send() 对首段文本走 settle_marker_line / settle_first_text：
+倒计时 create 命中时同步等执行结果，成功就整回合静默（余文作废、不播报），
+失败仍按老规矩（余文照常下发＋失败补播报）。闹钟域与倒计时的其他动作不走
+settle 的静默分支，行为逐字不变。
 """
 
 import asyncio
@@ -591,22 +597,43 @@ def _resolve_timer_target(spec, items):
 
 async def execute_timer(device_key, spec):
     """执行一条倒计时标记：调设备工具，结果（成败都）用补播报投递。永不抛异常。"""
+    _, text = await _timer_outcome(device_key, spec)
+    announce(device_key, text, bot_id=TIMER_BOT_ID)
+
+
+async def execute_timer_create_silent(device_key, spec):
+    """倒计时 create 的静默执行（用户要求：设好后不回复任何文字）：返回是否成功。
+
+    成功 → 不投递任何播报、返回 True，调用方（muse_session 的 settle 入口）
+    据此把回合余文整段作废，倒计时屏本身就是反馈；失败 → 与普通执行一样
+    把失败原因投进待汇报箱（不能静默失败）、返回 False，余文照常下发。
+    永不抛异常。
+    """
+    ok, text = await _timer_outcome(device_key, spec)
+    if ok:
+        logger.bind(tag=TAG).info(f"倒计时 create 成功，按要求静默不回复，设备={device_key}")
+        return True
+    announce(device_key, text, bot_id=TIMER_BOT_ID)
+    return False
+
+
+async def _timer_outcome(device_key, spec):
+    """跑一遍倒计时执行：返回 (成功与否, 结果文案)。永不抛异常。"""
     try:
-        text = await _execute_timer_inner(device_key, spec)
+        return await _execute_timer_inner(device_key, spec)
     except Exception as exc:  # noqa: BLE001 —— 桥出任何问题都不能影响回合本身
         logger.bind(tag=TAG).warning(f"倒计时桥执行异常：{exc!r}")
-        text = timer_failure_text(spec, _exception_reason(exc, "倒计时"))
-    announce(device_key, text, bot_id=TIMER_BOT_ID)
+        return False, timer_failure_text(spec, _exception_reason(exc, "倒计时"))
 
 
 async def _execute_timer_inner(device_key, spec):
     conn = _find_conn(device_key)
     if conn is None:
-        return timer_failure_text(spec, "设备不在线")
+        return False, timer_failure_text(spec, "设备不在线")
     mcp_client = getattr(conn, "mcp_client", None)
     loop = getattr(conn, "loop", None)
     if mcp_client is None or loop is None:
-        return timer_failure_text(spec, "设备还没准备好")
+        return False, timer_failure_text(spec, "设备还没准备好")
     from core.providers.tools.device_mcp.mcp_handler import call_mcp_tool
     from core.utils.util import sanitize_tool_name
 
@@ -634,18 +661,18 @@ async def _execute_timer_inner(device_key, spec):
     if action in ("cancel", "pause", "resume") and not spec.get("id"):
         data, error = await call("self.timer.list", {})
         if error:
-            return timer_failure_text(spec, error)
+            return False, timer_failure_text(spec, error)
         target, reason = _resolve_timer_target(spec, _result_items(data))
         if target is None:
-            return timer_failure_text(spec, reason)
+            return False, timer_failure_text(spec, reason)
         spec = dict(spec)
         spec["id"] = target.get("id")
         if target.get("label"):
             spec["_label"] = target["label"]
     data, error = await call(TIMER_ACTION_TOOLS[action], build_timer_args(spec))
     if error:
-        return timer_failure_text(spec, error)
-    return timer_success_text(spec, data)
+        return False, timer_failure_text(spec, error)
+    return True, timer_success_text(spec, data)
 
 
 # ---------- 回合入口：MuseSession.send() 发射第一段回复文本时调用 ----------
@@ -853,3 +880,82 @@ def process_first_text(device_key, text, streamed=None):
                 _dispatch(device_key, domain, spec, error, "增量")
                 return stripped, True
     return text, False
+
+
+# ---------- 静默收尾：倒计时 create 成功不回复（muse_session 的 settle 入口） ----------
+
+def _timer_create_spec(spec, error):
+    """提取结果是合法的倒计时 create 时返回 spec，否则 None（纯判定）。"""
+    if spec is not None and error is None and spec.get("action") == "create":
+        return spec
+    return None
+
+
+def _timer_create_hit_in_line(marker_line):
+    """一行已确认的标记是合法的倒计时 create 时返回它的 spec，否则 None。"""
+    if not marker_line or not marker_line.startswith(TIMER_MARKER):
+        return None
+    _, spec, error = extract_timer(marker_line)
+    return _timer_create_spec(spec, error)
+
+
+def _timer_create_hit_in_text(text, streamed):
+    """按 process_first_text 的来源顺序找合法的倒计时 create 命中（纯判定，无副作用）。
+
+    返回 (spec, 剥除标记行后的余文, 来源) 或 None。最终文本里出现倒计时标记
+    （哪怕非法或其他动作）或命中闹钟域时一律返回 None、交回原路径处理，保
+    证来源与域的优先级与 process_first_text 分毫不差。
+    """
+    stripped, spec, error = extract_timer(text)
+    if spec is not None or error is not None:
+        hit = _timer_create_spec(spec, error)
+        return (hit, stripped, "最终文本") if hit is not None else None
+    _, alarm_spec, alarm_error = extract(text)
+    if alarm_spec is not None or alarm_error is not None:
+        return None
+    if streamed:
+        _, spec, error = extract_timer(streamed)
+        hit = _timer_create_spec(spec, error)
+        if hit is not None:
+            return hit, strip_marker_from_final(text, _first_content_line(streamed)), "增量"
+    return None
+
+
+async def settle_marker_line(device_key, marker_line, text, source="增量"):
+    """门确认的首行标记在 send() 里的收尾：返回 (要下发的文本, 本回合是否静默)。
+
+    倒计时 create 命中时同步等执行结果（其余标记都是先安排执行、余文照常
+    下发，只有它必须先知道成败才能决定余文去留）：成功 → 余文整段作废、
+    不播报，返回 ("", True)；失败 → 失败照常补播报，余文只剥标记行照常
+    下发。其余一切标记（闹钟全部动作、倒计时其他动作、非法标记）与
+    handle_marker_line + strip_marker_from_final 的既有行为逐字一致。
+    """
+    spec = _timer_create_hit_in_line(marker_line)
+    if spec is not None:
+        logger.bind(tag=TAG).info(
+            f"倒计时标记命中：来源={source}，action=create，设备={device_key}")
+        if await execute_timer_create_silent(device_key, spec):
+            return "", True
+        return strip_marker_from_final(text, marker_line), False
+    handle_marker_line(device_key, marker_line, source=source)
+    return strip_marker_from_final(text, marker_line), False
+
+
+async def settle_first_text(device_key, text, streamed=None):
+    """process_first_text 的静默版（send() 在门判普通时用）。
+
+    返回 (要下发的文本, 是否命中了标记, 本回合是否静默)。倒计时 create
+    命中时同步等执行结果：成功 → 余文整段作废、不播报；失败 → 照常（余文
+    剥行下发＋失败补播报）。其余情形内部就是 process_first_text，行为逐字
+    一致。
+    """
+    hit = _timer_create_hit_in_text(text, streamed)
+    if hit is not None:
+        spec, stripped, source = hit
+        logger.bind(tag=TAG).info(
+            f"倒计时标记命中：来源={source}，action=create，设备={device_key}")
+        if await execute_timer_create_silent(device_key, spec):
+            return "", True, True
+        return stripped, True, False
+    stripped, consumed = process_first_text(device_key, text, streamed)
+    return stripped, consumed, False
