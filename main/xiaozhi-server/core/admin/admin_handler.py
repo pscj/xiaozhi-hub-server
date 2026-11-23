@@ -13,14 +13,12 @@
 
 import asyncio
 import copy
-import email.utils
 import functools
 import json
 import os
 import re
 import tempfile
 import time
-import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,76 +58,49 @@ SECURITY_HEADERS = {
 EMOTION_EMOJI = {name: emoji for emoji, name in EMOJI_MAP.items()}
 KIOSK_ASR_MAX_BYTES = 16000 * 2 * 10  # /kiosk/asr 最多 10 秒音频
 
-# 信息屏新闻（GET /news.json）：网关直接拉 AIHOT 的 RSS，在本地转换成 {date, items} 后缓存，
+# 信息屏新闻（GET /news.json）：网关直接拉 AIHOT 的热点榜 API，在本地转换成 {date, items} 后缓存，
 # 缓存文件放 data/ 下（和后台登录接力文件同一目录，见 AdminHandler.__init__）
-NEWS_UPSTREAM_URL = "https://aihot.news/feed.xml"
+# 2026-11-23 用户拍板换 hot-topics 接口：拿到后不做任何筛选（不按时间窗、不过滤分类、
+# 不截断条数），按榜单原顺序直用；接口不带分类，category 留空，客户端据此不显示分类标签
+# （2026-11-23 用户定：没分类就不显示，还能省两个字）
+NEWS_UPSTREAM_URL = "https://aihot.news/api/v1/hot-topics"
 NEWS_CACHE_TTL_SECONDS = 30 * 60  # 缓存在这个时长内算新鲜，直接返回、不回源
 NEWS_RETRY_SECONDS = 60  # 回源失败后至少隔这么久才再试，免得设备每次亮屏都打一次外网
 NEWS_FETCH_TIMEOUT_SECONDS = 5.0  # 回源超时：局域网设备在等着，宁可先给旧缓存也不能久等
-NEWS_WINDOW_SECONDS = 48 * 60 * 60  # 只收最近 48 小时内发布的；24 小时窗口时合格条数经常只剩 2–3 条撑不满屏，2026-11-23 用户拍板放宽到 48 小时
-NEWS_MAX_ITEMS = 8  # 信息屏一屏只滚动个位数条目，多了截断（按发布时间倒序取最新的）
-# 信息屏分类只用这四个（和客户端的约定）；AIHOT 的原生分类按下表映射，未见过的新分类一律归「行业」
-NEWS_CATEGORY_MAP = {"AI 模型": "模型", "AI 产品": "产品", "行业动态": "行业", "论文": "模型"}
-NEWS_CATEGORY_SKIP = {"教程", "观点"}  # 这两类不是新闻，直接滤掉
+NEWS_CATEGORY = ""  # hot-topics 不带分类字段：留空，客户端据此不显示分类标签（2026-11-23 用户定）
 NEWS_TZ = timezone(timedelta(hours=8))  # Asia/Shanghai 无夏令时，固定 +8，免依赖系统 tzdata（路由器上未必有）
 
 
-def map_news_category(raw: str):
-    """AIHOT 原生分类 -> 信息屏分类；返回 None 表示这条直接滤掉（教程/观点）。"""
-    name = (raw or "").strip()
-    if name in NEWS_CATEGORY_SKIP:
-        return None
-    return NEWS_CATEGORY_MAP.get(name, "行业")
+def convert_hot_topics(payload: bytes, now: datetime):
+    """把 AIHOT hot-topics 的 JSON 转成信息屏要的 {"date", "items": [...]}；转不出条目返回 None。
 
-
-def _parse_rss_pubdate(text: str):
-    """RSS 的 pubDate 是 RFC 822 格式；解析不了返回 None，没带时区按 UTC 算。"""
-    if not text:
-        return None
-    try:
-        published = email.utils.parsedate_to_datetime(text.strip())
-    except (TypeError, ValueError):
-        return None
-    if published is None:
-        return None
-    if published.tzinfo is None:
-        published = published.replace(tzinfo=timezone.utc)
-    return published
-
-
-def convert_aihot_feed(xml_bytes: bytes, now: datetime):
-    """把 AIHOT 的 RSS 转成信息屏要的 {"date", "items": [...]}；转不出条目返回 None。
-
-    只收最近 NEWS_WINDOW_SECONDS 内发布的（允许 1 小时时钟偏差），按发布时间倒序、
-    最多 NEWS_MAX_ITEMS 条；标题只做首尾空白清理，summary 一律空字符串。
-    解析失败或一条都收不到都返回 None：调用方当作回源失败，继续用旧缓存，
-    别让设备因为源站抖动显示空白。
+    按接口返回的榜单原顺序输出（latestAt 并非单调，不要按时间重排），不做任何筛选；
+    只留格式底线：title 缺失、不是字符串或为空白的条目跳过，标题做首尾空白清理，
+    summary 一律空字符串。JSON 解析失败、结构不对或一条可用条目都没有都返回 None：
+    调用方当作回源失败，继续用旧缓存，别让设备因为源站抖动显示空白。
     """
     try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError:
+        doc = json.loads(payload)
+    except ValueError:
         return None
-    picked = []
-    for item in root.findall(".//item"):
-        title = (item.findtext("title") or "").strip()
+    if not isinstance(doc, dict) or not isinstance(doc.get("items"), list):
+        return None
+    items = []
+    for entry in doc["items"]:
+        if not isinstance(entry, dict):
+            continue
+        title = entry.get("title")
+        if not isinstance(title, str):
+            continue
+        title = title.strip()
         if not title:
             continue
-        category = map_news_category(item.findtext("category"))
-        if category is None:
-            continue
-        published = _parse_rss_pubdate(item.findtext("pubDate"))
-        if published is None:
-            continue
-        age = (now - published).total_seconds()
-        if age > NEWS_WINDOW_SECONDS or age < -3600:
-            continue
-        picked.append((published, {"category": category, "title": title, "summary": ""}))
-    if not picked:
+        items.append({"category": NEWS_CATEGORY, "title": title, "summary": ""})
+    if not items:
         return None
-    picked.sort(key=lambda pair: pair[0], reverse=True)
     return {
         "date": now.astimezone(NEWS_TZ).strftime("%Y-%m-%d"),
-        "items": [entry for _, entry in picked[:NEWS_MAX_ITEMS]],
+        "items": items,
     }
 
 
@@ -1021,7 +992,7 @@ class AdminHandler:
         """信息屏的新闻文件（GET /news.json），内容是公开新闻，不用登录（同设备接口约定）。
 
         先用 data/news.json 的本地缓存：新鲜（NEWS_CACHE_TTL_SECONDS 内）直接返回；
-        过期才回源拉一次上游 RSS 并转换，成功就刷新缓存再返回。回源失败不报错：
+        过期才回源拉一次上游热点榜 API 并转换，成功就刷新缓存再返回。回源失败不报错：
         有旧缓存就返回旧的（哪怕已过期），什么都没有才回 503，设备端会继续显示占位内容。
         """
         cached = await self._blocking(self._read_news_cache)
@@ -1050,18 +1021,18 @@ class AdminHandler:
         return data, mtime
 
     def _fetch_news_upstream(self):
-        """回源拉一次 AIHOT 的 RSS 并转换：转出非空条目才写入缓存并返回，否则返回 None。"""
+        """回源拉一次 AIHOT 的热点榜 API 并转换：转出非空条目才写入缓存并返回，否则返回 None。"""
         import httpx
 
         try:
             resp = httpx.get(NEWS_UPSTREAM_URL, timeout=NEWS_FETCH_TIMEOUT_SECONDS, follow_redirects=True)
             resp.raise_for_status()
-            data = convert_aihot_feed(resp.content, datetime.now(timezone.utc))
+            data = convert_hot_topics(resp.content, datetime.now(timezone.utc))
         except Exception as e:
             self.logger.bind(tag=TAG).warning(f"拉取信息屏新闻失败，有缓存时继续用缓存: {e}")
             return None
         if data is None:
-            self.logger.bind(tag=TAG).warning("信息屏新闻的上游 RSS 没转出最近 48 小时的条目，忽略本次回源")
+            self.logger.bind(tag=TAG).warning("信息屏新闻的上游热点榜没转出可用条目，忽略本次回源")
             return None
         try:
             self.news_cache_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,14 @@
 """信息屏新闻接口 GET /news.json：不用登录，缓存优先、回源失败回退旧缓存、无缓存时 503。
 
-回源是 AIHOT 的 RSS，网关侧转换成 {date, items}；转换规则（48 小时窗口、分类映射、
-教程/观点过滤、上限 8 条）在 convert_aihot_feed / map_news_category 里单测，
-回源请求一律 monkeypatch 掉，不真打外网。
+回源是 AIHOT 的热点榜 API（hot-topics），网关侧转换成 {date, items}；2026-11-23 起
+不筛选直用：按榜单原顺序输出、条数不截断、分类留空（客户端不显示标签），转换规则在
+convert_hot_topics 里单测，回源请求一律 monkeypatch 掉，不真打外网。
 """
 
-import email.utils
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -17,25 +16,34 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from core.admin.admin_handler import AdminHandler, convert_aihot_feed, map_news_category
+from core.admin.admin_handler import AdminHandler, convert_hot_topics
 
-NEWS = {"date": "2026-11-12", "items": [{"category": "模型", "title": "标题", "summary": ""}]}
+NEWS = {"date": "2026-11-23", "items": [{"category": "", "title": "标题", "summary": ""}]}
 
-NOW = datetime(2026, 11, 13, 1, 0, tzinfo=timezone.utc)  # 上海时间 2026-11-13 09:00
+NOW = datetime(2026, 11, 23, 7, 0, tzinfo=timezone.utc)  # 上海时间 2026-11-23 15:00
 
 
-def _rss(items) -> bytes:
-    """把 (标题, 分类, 发布时间) 列表拼成 AIHOT 形态的 RSS；分类为 None 表示不带 category。"""
-    parts = ['<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>AIHOT</title>']
-    for title, category, published in items:
-        parts.append("<item>")
-        parts.append(f"<title>{title}</title>")
-        if category is not None:
-            parts.append(f"<category>{category}</category>")
-        parts.append(f"<pubDate>{email.utils.format_datetime(published)}</pubDate>")
-        parts.append("</item>")
-    parts.append("</channel></rss>")
-    return "".join(parts).encode("utf-8")
+def _hot_topics(entries) -> bytes:
+    """把条目列表拼成 hot-topics 形态的 JSON；条目原样放进 items，可传 dict 或原始值。"""
+    doc = {"schemaVersion": 1, "count": len(entries), "items": list(entries)}
+    return json.dumps(doc, ensure_ascii=False).encode("utf-8")
+
+
+def _entry(rank, title, latest_at="2026-11-23T01:00:23.127Z"):
+    """一条贴近真实接口形状的热点条目。"""
+    return {
+        "rank": rank,
+        "id": f"id{rank}",
+        "storyPublicId": f"story{rank}",
+        "title": title,
+        "source": {"name": "TechCrunch：AI（RSS）"},
+        "links": {"aihot": f"https://aihot.news/items/id{rank}"},
+        "sourceCount": 7,
+        "signalCount": 28,
+        "participantCount": 35,
+        "sourceNames": ["TechCrunch：AI（RSS）"],
+        "latestAt": latest_at,
+    }
 
 
 @pytest.fixture
@@ -95,89 +103,62 @@ async def test_news_json_returns_fresh_fetch(client, monkeypatch):
     assert await r.json() == NEWS
 
 
-# ---------- 分类映射 ----------
+# ---------- 热点榜转换 ----------
 
 
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        ("AI 模型", "模型"),
-        ("AI 产品", "产品"),
-        ("行业动态", "行业"),
-        ("论文", "模型"),
-        ("未见过的新分类", "行业"),
-        ("", "行业"),
-        (None, "行业"),
-        (" AI 产品 ", "产品"),  # 带空白也能认
-        ("教程", None),
-        ("观点", None),
-    ],
-)
-def test_map_news_category(raw, expected):
-    assert map_news_category(raw) == expected
-
-
-# ---------- RSS 转换 ----------
-
-
-def test_convert_filters_window_and_sorts_desc():
-    xml = _rss(
+def test_convert_keeps_rank_order_even_if_latest_at_unordered():
+    # latestAt 故意乱序（rank 1 的最新动态反而最早）：输出必须按榜单原顺序，不按时间重排
+    payload = _hot_topics(
         [
-            ("两小时前", "行业动态", NOW - timedelta(hours=2)),
-            ("刚刚", "行业动态", NOW - timedelta(minutes=5)),
-            ("49 小时前", "行业动态", NOW - timedelta(hours=49)),
-            ("25 小时前", "行业动态", NOW - timedelta(hours=25)),
-            ("47 小时前", "行业动态", NOW - timedelta(hours=47)),
+            _entry(1, "第一名", latest_at="2026-11-22T01:00:00.000Z"),
+            _entry(2, "第二名", latest_at="2026-11-23T06:00:00.000Z"),
+            _entry(3, "第三名", latest_at="2026-11-21T01:00:00.000Z"),
         ]
     )
-    data = convert_aihot_feed(xml, NOW)
-    assert [i["title"] for i in data["items"]] == ["刚刚", "两小时前", "25 小时前", "47 小时前"]
-    assert data["date"] == "2026-11-13"
+    data = convert_hot_topics(payload, NOW)
+    assert [i["title"] for i in data["items"]] == ["第一名", "第二名", "第三名"]
+    assert data["date"] == "2026-11-23"
+    assert all(i["category"] == "" for i in data["items"])
     assert all(i["summary"] == "" for i in data["items"])
 
 
-def test_convert_caps_at_8_items():
-    xml = _rss([(f"第{n}条", "AI 产品", NOW - timedelta(minutes=n)) for n in range(10)])
-    data = convert_aihot_feed(xml, NOW)
-    assert len(data["items"]) == 8
-    assert data["items"][0]["title"] == "第0条"  # 最新的在最前
+def test_convert_passes_all_10_items_without_cap():
+    payload = _hot_topics([_entry(n, f"第{n}条") for n in range(1, 11)])
+    data = convert_hot_topics(payload, NOW)
+    assert len(data["items"]) == 10
+    assert data["items"][0]["title"] == "第1条"
+    assert data["items"][-1]["title"] == "第10条"
 
 
-def test_convert_maps_categories_and_skips_tutorial_and_opinion():
-    xml = _rss(
+def test_convert_skips_empty_or_missing_titles():
+    payload = _hot_topics(
         [
-            ("模型新闻", "AI 模型", NOW - timedelta(hours=1)),
-            ("论文新闻", "论文", NOW - timedelta(hours=1)),
-            ("新分类新闻", "某个新分类", NOW - timedelta(hours=1)),
-            ("无分类新闻", None, NOW - timedelta(hours=1)),
-            ("教程贴", "教程", NOW - timedelta(hours=1)),
-            ("观点贴", "观点", NOW - timedelta(hours=1)),
+            _entry(1, "正常标题"),
+            _entry(2, ""),
+            _entry(3, "   "),
+            {"rank": 4, "id": "id4"},  # 没有 title 字段
+            _entry(5, None),
+            _entry(6, "  带空白的标题 \n"),
+            "不是对象的条目",
         ]
     )
-    data = convert_aihot_feed(xml, NOW)
-    got = {i["title"]: i["category"] for i in data["items"]}
-    assert got == {"模型新闻": "模型", "论文新闻": "模型", "新分类新闻": "行业", "无分类新闻": "行业"}
-
-
-def test_convert_strips_title_whitespace():
-    xml = _rss([("  带空白的标题 \n", "AI 模型", NOW - timedelta(hours=1))])
-    data = convert_aihot_feed(xml, NOW)
-    assert data["items"][0]["title"] == "带空白的标题"
+    data = convert_hot_topics(payload, NOW)
+    assert [i["title"] for i in data["items"]] == ["正常标题", "带空白的标题"]
 
 
 def test_convert_date_is_shanghai_today():
-    # UTC 2026-11-12 16:30 已是上海的 2026-11-13 00:30
-    now = datetime(2026, 11, 12, 16, 30, tzinfo=timezone.utc)
-    xml = _rss([("半小时前", "AI 模型", now - timedelta(minutes=30))])
-    assert convert_aihot_feed(xml, now)["date"] == "2026-11-13"
+    # UTC 2026-11-22 16:30 已是上海的 2026-11-23 00:30
+    now = datetime(2026, 11, 22, 16, 30, tzinfo=timezone.utc)
+    payload = _hot_topics([_entry(1, "标题")])
+    assert convert_hot_topics(payload, now)["date"] == "2026-11-23"
 
 
 def test_convert_returns_none_when_nothing_usable():
-    assert convert_aihot_feed(b"this is not xml", NOW) is None
-    old_only = _rss([("三天前", "AI 模型", NOW - timedelta(days=3))])
-    assert convert_aihot_feed(old_only, NOW) is None
-    skipped_only = _rss([("教程贴", "教程", NOW - timedelta(hours=1))])
-    assert convert_aihot_feed(skipped_only, NOW) is None
+    assert convert_hot_topics(b"this is not json", NOW) is None
+    assert convert_hot_topics(b"{}", NOW) is None  # 没有 items
+    assert convert_hot_topics(b'{"items": {}}', NOW) is None  # items 不是数组
+    assert convert_hot_topics(_hot_topics([]), NOW) is None  # items 为空
+    assert convert_hot_topics(_hot_topics([_entry(1, ""), _entry(2, "  ")]), NOW) is None  # 全是空标题
 
 
 # ---------- 真回源（只 stub httpx.get，不真打外网） ----------
@@ -191,20 +172,21 @@ class _FakeResp:
         pass
 
 
-async def test_news_json_fetches_rss_and_caches(client, cache_file, monkeypatch):
-    now = datetime.now(timezone.utc)
-    xml = _rss(
-        [
-            ("最新产品", "AI 产品", now - timedelta(minutes=10)),
-            ("过期新闻", "AI 模型", now - timedelta(hours=50)),
-        ]
-    )
-    monkeypatch.setattr(httpx, "get", lambda *a, **kw: _FakeResp(xml))
+async def test_news_json_fetches_hot_topics_and_caches(client, cache_file, monkeypatch):
+    payload = _hot_topics([_entry(1, "榜首话题"), _entry(2, "第二话题")])
+    seen = {}
+
+    def fake_get(url, **kw):
+        seen["url"] = url
+        return _FakeResp(payload)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
     r = await client.get("/news.json")
     assert r.status == 200
     body = await r.json()
-    assert [i["title"] for i in body["items"]] == ["最新产品"]
-    assert body["items"][0]["category"] == "产品"
+    assert seen["url"] == "https://aihot.news/api/v1/hot-topics"
+    assert [i["title"] for i in body["items"]] == ["榜首话题", "第二话题"]
+    assert all(i["category"] == "" for i in body["items"])
     # 转换结果同时写进了缓存文件
     assert json.loads(cache_file.read_text(encoding="utf-8")) == body
 
