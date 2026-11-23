@@ -1,6 +1,6 @@
 """信息屏新闻接口 GET /news.json：不用登录，缓存优先、回源失败回退旧缓存、无缓存时 503。
 
-回源是 AIHOT 的 RSS，网关侧转换成 {date, items}；转换规则（24 小时窗口、分类映射、
+回源是 AIHOT 的 RSS，网关侧转换成 {date, items}；转换规则（48 小时窗口、分类映射、
 教程/观点过滤、上限 8 条）在 convert_aihot_feed / map_news_category 里单测，
 回源请求一律 monkeypatch 掉，不真打外网。
 """
@@ -125,12 +125,13 @@ def test_convert_filters_window_and_sorts_desc():
         [
             ("两小时前", "行业动态", NOW - timedelta(hours=2)),
             ("刚刚", "行业动态", NOW - timedelta(minutes=5)),
+            ("49 小时前", "行业动态", NOW - timedelta(hours=49)),
             ("25 小时前", "行业动态", NOW - timedelta(hours=25)),
-            ("23 小时前", "行业动态", NOW - timedelta(hours=23)),
+            ("47 小时前", "行业动态", NOW - timedelta(hours=47)),
         ]
     )
     data = convert_aihot_feed(xml, NOW)
-    assert [i["title"] for i in data["items"]] == ["刚刚", "两小时前", "23 小时前"]
+    assert [i["title"] for i in data["items"]] == ["刚刚", "两小时前", "25 小时前", "47 小时前"]
     assert data["date"] == "2026-11-13"
     assert all(i["summary"] == "" for i in data["items"])
 
@@ -195,7 +196,7 @@ async def test_news_json_fetches_rss_and_caches(client, cache_file, monkeypatch)
     xml = _rss(
         [
             ("最新产品", "AI 产品", now - timedelta(minutes=10)),
-            ("过期新闻", "AI 模型", now - timedelta(hours=30)),
+            ("过期新闻", "AI 模型", now - timedelta(hours=50)),
         ]
     )
     monkeypatch.setattr(httpx, "get", lambda *a, **kw: _FakeResp(xml))

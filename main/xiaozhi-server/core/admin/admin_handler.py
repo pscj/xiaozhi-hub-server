@@ -66,7 +66,7 @@ NEWS_UPSTREAM_URL = "https://aihot.news/feed.xml"
 NEWS_CACHE_TTL_SECONDS = 30 * 60  # 缓存在这个时长内算新鲜，直接返回、不回源
 NEWS_RETRY_SECONDS = 60  # 回源失败后至少隔这么久才再试，免得设备每次亮屏都打一次外网
 NEWS_FETCH_TIMEOUT_SECONDS = 5.0  # 回源超时：局域网设备在等着，宁可先给旧缓存也不能久等
-NEWS_WINDOW_SECONDS = 24 * 60 * 60  # 只收最近 24 小时内发布的；这个源一天约 19 条，量够、不回溯补数
+NEWS_WINDOW_SECONDS = 48 * 60 * 60  # 只收最近 48 小时内发布的；24 小时窗口时合格条数经常只剩 2–3 条撑不满屏，2026-11-23 用户拍板放宽到 48 小时
 NEWS_MAX_ITEMS = 8  # 信息屏一屏只滚动个位数条目，多了截断（按发布时间倒序取最新的）
 # 信息屏分类只用这四个（和客户端的约定）；AIHOT 的原生分类按下表映射，未见过的新分类一律归「行业」
 NEWS_CATEGORY_MAP = {"AI 模型": "模型", "AI 产品": "产品", "行业动态": "行业", "论文": "模型"}
@@ -1061,7 +1061,7 @@ class AdminHandler:
             self.logger.bind(tag=TAG).warning(f"拉取信息屏新闻失败，有缓存时继续用缓存: {e}")
             return None
         if data is None:
-            self.logger.bind(tag=TAG).warning("信息屏新闻的上游 RSS 没转出最近 24 小时的条目，忽略本次回源")
+            self.logger.bind(tag=TAG).warning("信息屏新闻的上游 RSS 没转出最近 48 小时的条目，忽略本次回源")
             return None
         try:
             self.news_cache_path.parent.mkdir(parents=True, exist_ok=True)
